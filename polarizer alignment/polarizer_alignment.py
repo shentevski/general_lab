@@ -1,0 +1,75 @@
+"""
+polarizer_alignment.py
+======================
+Live power readout (left) plus a point-by-point plot (right), for checking a
+polarizer against Malus' law or just peaking up an alignment.
+
+Left panel  : the current power, big, with the wavelength it was measured at.
+Right panel : every saved measurement -- power (vertical) against measurement
+              number 1, 2, 3, ... (horizontal).
+
+Press **s** in the window to save the current reading as the next point.
+Close the window to stop.
+
+Run it on the Windows PC the meter is plugged into:
+
+    python polarizer_alignment.py
+"""
+
+import matplotlib.pyplot as plt
+
+from thorlabs_powermeter import PowerMeter
+
+WAVELENGTH_NM = 450.0
+INTERVAL_S = 0.1
+
+# matplotlib grabs 's' for its own save-figure dialog -- leave that on ctrl+s.
+plt.rcParams["keymap.save"] = ["ctrl+s"]
+
+powers = []
+
+
+def main():
+    with PowerMeter(wavelength_nm=WAVELENGTH_NM) as pm:
+        pm.average_count = 10
+        pm.auto_range = True
+        print("Connected to", pm.identity.model, "-- press 's' to save a point.")
+
+        plt.ion()
+        figure, (readout, graph) = plt.subplots(1, 2, figsize=(11, 5))
+
+        readout.axis("off")
+        number = readout.text(0.5, 0.55, "", ha="center", va="center", fontsize=44)
+        label = readout.text(
+            0.5, 0.25, f"at {WAVELENGTH_NM:.0f} nm", ha="center", fontsize=14
+        )
+
+        (line,) = graph.plot([], [], "o-")
+        graph.set_xlabel("measurement number")
+        graph.set_ylabel("power (uW)")
+        graph.grid(True, alpha=0.3)
+
+        def on_key(event):
+            if event.key == "s":
+                powers.append(pm.read_power() * 1e6)
+                print(f"{len(powers)}: {powers[-1]:.3f} uW")
+
+        figure.canvas.mpl_connect("key_press_event", on_key)
+
+        while plt.fignum_exists(figure.number):
+            number.set_text(f"{pm.read_power() * 1e6:.3f} uW")
+            label.set_text(f"at {WAVELENGTH_NM:.0f} nm  |  {len(powers)} saved")
+
+            line.set_data(range(1, len(powers) + 1), powers)
+            graph.relim()
+            graph.autoscale_view()
+            plt.pause(INTERVAL_S)
+
+        plt.ioff()
+
+    for index, power in enumerate(powers, start=1):
+        print(f"{index}\t{power:.6f}")
+
+
+if __name__ == "__main__":
+    main()
