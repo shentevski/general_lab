@@ -13,14 +13,16 @@ Close the window to stop.
 
 Run it on the Windows PC the meter is plugged into:
 
-    python polarizer_alignment.py
+    python polarizer_alignment.py --wavelength_nm 633
 """
+
+import argparse
 
 import matplotlib.pyplot as plt
 
 from thorlabs_powermeter import PowerMeter
 
-WAVELENGTH_NM = 450.0
+DEFAULT_WAVELENGTH_NM = 450.0
 INTERVAL_S = 0.1
 
 # matplotlib grabs 's' for its own save-figure dialog -- leave that on ctrl+s.
@@ -29,11 +31,12 @@ plt.rcParams["keymap.save"] = ["ctrl+s"]
 powers = []
 
 
-def main():
-    with PowerMeter(wavelength_nm=WAVELENGTH_NM) as pm:
+def main(wavelength_nm):
+    with PowerMeter(wavelength_nm=wavelength_nm) as pm:
         pm.average_count = 10
         pm.auto_range = True
-        print("Connected to", pm.identity.model, "-- press 's' to save a point.")
+        print("Connected to", pm.identity.model, "at", pm.wavelength_nm, "nm")
+        print("Press 's' to save a point.")
 
         plt.ion()
         figure, (readout, graph) = plt.subplots(1, 2, figsize=(11, 5))
@@ -41,7 +44,7 @@ def main():
         readout.axis("off")
         number = readout.text(0.5, 0.55, "", ha="center", va="center", fontsize=44)
         label = readout.text(
-            0.5, 0.25, f"at {WAVELENGTH_NM:.0f} nm", ha="center", fontsize=14
+            0.5, 0.25, f"at {wavelength_nm:.0f} nm", ha="center", fontsize=14
         )
 
         (line,) = graph.plot([], [], "o-")
@@ -58,7 +61,7 @@ def main():
 
         while plt.fignum_exists(figure.number):
             number.set_text(f"{pm.read_power() * 1e6:.3f} uW")
-            label.set_text(f"at {WAVELENGTH_NM:.0f} nm  |  {len(powers)} saved")
+            label.set_text(f"at {wavelength_nm:.0f} nm  |  {len(powers)} saved")
 
             line.set_data(range(1, len(powers) + 1), powers)
             graph.relim()
@@ -72,4 +75,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--wavelength_nm",
+        type=float,
+        default=DEFAULT_WAVELENGTH_NM,
+        help="operating wavelength in nm (default: %(default)s)",
+    )
+    main(parser.parse_args().wavelength_nm)
