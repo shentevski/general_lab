@@ -192,7 +192,7 @@ def ask(prompt: str, enabled: bool) -> None:
 
 
 def sample_series(pm, duration_s, interval_s, temperature_every_s, csv_path,
-                  header_lines, progress_label):
+                  header_lines, progress_label, read_temperature=False):
     """Log power to ``csv_path`` as it is measured and return the arrays.
 
     Rows are written and flushed as they arrive, so a Ctrl-C or a dropped USB
@@ -202,7 +202,6 @@ def sample_series(pm, duration_s, interval_s, temperature_every_s, csv_path,
     powers: list[float] = []
     temps: list[float] = []
 
-    read_temperature = temperature_every_s > 0
     show_progress = sys.stdout.isatty()
     next_temperature = 0.0
     last_flush = 0.0
@@ -228,11 +227,7 @@ def sample_series(pm, duration_s, interval_s, temperature_every_s, csv_path,
 
                 temperature = float("nan")
                 if read_temperature and elapsed >= next_temperature:
-                    try:
-                        temperature = pm.read_head_temperature()
-                    except PowerMeterError:
-                        # Plenty of heads have no thermistor; ask once, then stop.
-                        read_temperature = False
+                    temperature = pm.read_head_temperature()
                     next_temperature = elapsed + temperature_every_s
 
                 times.append(elapsed)
@@ -352,6 +347,12 @@ def main(argv=None) -> int:
         print(f"Sensor:      {sensor}")
         print(f"Calibration: {pm.calibration_message}")
 
+        # Only heads that report a thermistor may be asked for a temperature.
+        log_temperature = (sensor.has_temperature_sensor
+                           and args.temperature_every_s > 0)
+        if args.temperature_every_s > 0 and not sensor.has_temperature_sensor:
+            print("             (no thermistor in this head -- temperature not logged)")
+
         pm.power_unit = "W"
         pm.wavelength_nm = args.wavelength_nm
         pm.average_count = args.average_count
@@ -397,7 +398,7 @@ def main(argv=None) -> int:
                     [f"segment: dark (beam blocked)",
                      f"wavelength_nm: {args.wavelength_nm:g}",
                      f"average_count: {args.average_count}"],
-                    "dark",
+                    "dark", read_temperature=log_temperature,
                 )
                 if dark_powers.size:
                     took_dark = True
@@ -452,6 +453,7 @@ def main(argv=None) -> int:
         times, powers, temps, interrupted = sample_series(
             pm, args.duration_s, args.interval_s, args.temperature_every_s,
             power_csv, header_lines_from(meta), "run",
+            read_temperature=log_temperature,
         )
 
     if powers.size == 0:
