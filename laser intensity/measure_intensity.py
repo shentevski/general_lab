@@ -29,13 +29,13 @@ Three things decide whether the data is worth analysing:
   puts a step in the data that reads back as "drift"; ``--lock_range`` freezes
   the range to avoid that, and ``--range_w`` pins one outright. Try those only
   if the plain run works first.
-* **The averaging.** You should not have to think about this. The meter takes
-  3000 hardware samples a second, and ``average_count`` says how many go into
-  one reading -- so it is really an integration time. By default this script
-  sets it to ``3000 * interval_s``, which makes each reading last exactly as
-  long as the gap before the next one. The meter then integrates continuously,
-  nothing happens between readings that you failed to measure, and nothing
-  aliases. Set ``--interval_s`` alone and leave ``--average_count`` unset.
+* **The averaging.** This script does not set it. Thorlabs' own PMxxx ctypes
+  example never does either -- it opens the device, waits, sets wavelength,
+  auto-range and unit, and measures. Whatever the console's front panel is set
+  to is what you get, and it is recorded in the metadata. ``--average_count``
+  will override it, but a large value makes one reading outlast the driver's
+  read timeout, and every call after that fails with "a previous response is
+  still pending".
 * **The console's own bandwidth filter.** The PM100D has a separate HI/LO
   analogue bandwidth setting on the front panel (Meas Config), and Thorlabs
   recommends LO for photodiode heads. The driver cannot read or set it, so it
@@ -90,9 +90,9 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--average_count", type=int, default=None, metavar="N",
-        help="hardware samples averaged per reading, 3000 per second. Leave it "
-             "alone: by default it is matched to --interval_s so the meter "
-             "integrates continuously with no idle gaps",
+        help="override the console's averaging. Left alone by default: "
+             "Thorlabs' own example never sets it, and a large value makes one "
+             "read outlast the driver timeout",
     )
 
     parser.add_argument(
@@ -160,24 +160,6 @@ def parse_args(argv=None):
     )
 
     return parser.parse_args(argv)
-
-
-def averaging_for(interval_s: float) -> int:
-    """How many hardware samples to average, to fill one sample interval.
-
-    The meter takes 3000 samples a second, so integrating for the whole gap
-    between readings means averaging 3000 * interval_s of them. Matching the
-    two is the whole trick: with no idle time between readings, nothing the
-    laser does goes unmeasured, and nothing aliases into the record. Leave a
-    gap and whatever happened in it comes back disguised as noise.
-
-    ``--interval_s 0`` means free-running as fast as the USB allows, so the
-    shortest possible reading is the right one.
-    """
-    if interval_s <= 0:
-        return 1
-    # int16 in the driver; 32767 samples is ~11 s of integration.
-    return int(min(max(round(HARDWARE_SAMPLES_PER_S * interval_s), 1), 32767))
 
 
 def run_stem(args) -> str:
@@ -305,7 +287,7 @@ def describe(pm, args):
         "calibration_message": sensor.calibration_message,
         "wavelength_nm": maybe(lambda: pm.wavelength_nm),
         "wavelength_range_nm": [low, high],
-        "average_count": maybe(lambda: pm.average_count, args.average_count),
+        "average_count": maybe(lambda: pm.average_count, 1),
         "power_unit": maybe(lambda: pm.power_unit, "W"),
         "auto_range": maybe(lambda: pm.auto_range),
         "power_range_w": maybe(lambda: pm.power_range_w),
@@ -343,9 +325,6 @@ def main(argv=None) -> int:
             print("   (none)")
         return 0
 
-    if args.average_count is None:
-        args.average_count = averaging_for(args.interval_s)
-
     args.out_dir.mkdir(parents=True, exist_ok=True)
     stem = run_stem(args)
     power_csv = args.out_dir / f"{stem}.csv"
@@ -355,6 +334,12 @@ def main(argv=None) -> int:
     prompts = not args.no_prompt
 
     with PowerMeter(args.resource, channel=args.channel) as pm:
+        # Thorlabs' example sleeps 2 s between opening the device and
+        # configuring it: the console reads the sensor's non-volatile memory on
+        # connect and is not ready straight away. Commands sent into that gap
+        # are a good way to desync the response queue.
+        time.sleep(2.0)
+
         identity = pm.identity
         sensor = pm.sensor
         print(f"Connected to {identity.model} (S/N {identity.serial_number})")
@@ -368,17 +353,18 @@ def main(argv=None) -> int:
             print("             (no thermistor in this head -- temperature not logged)")
 
         pm.wavelength_nm = args.wavelength_nm
-        pm.average_count = args.average_count
-        integration_s = args.average_count / HARDWARE_SAMPLES_PER_S
+        pm.auto_range = True
+        pm.power_unit = "W"
+        if args.average_count is not None:
+            pm.average_count = args.average_count
+
+        average_count = pm.average_count
+        integration_s = average_count / HARDWARE_SAMPLES_PER_S
         duty = integration_s / args.interval_s if args.interval_s > 0 else 1.0
-        print(f"Averaging:   {args.average_count} samples = "
+        print(f"Averaging:   {average_count} samples (console setting) = "
               f"{integration_s * 1e3:.1f} ms per reading, taken every "
               f"{args.interval_s * 1e3:.0f} ms ({duty * 100:.0f} % of the time "
               f"integrating)")
-        if duty < 0.5:
-            print("             ^ the meter is idle most of each interval; drop "
-                  "--average_count\n               to let it match --interval_s "
-                  "automatically.")
         if args.attenuation_db is not None:
             pm.attenuation_db = args.attenuation_db
         if args.beam_diameter_mm is not None:
@@ -410,8 +396,7 @@ def main(argv=None) -> int:
             pm.power_range_w = pm.power_range_w      # freeze wherever it landed
             print(f"Range locked at {pm.power_range_w:.3e} W")
         else:
-            pm.auto_range = True
-            range_mode = "auto"
+            range_mode = "auto"                      # already enabled above
             print(f"Auto-range on (reading {pm.read_power() * 1e6:.4f} uW)")
 
         # --- now block the beam: zero on that range, then measure the floor
@@ -444,7 +429,7 @@ def main(argv=None) -> int:
                     dark_csv,
                     [f"segment: dark (beam blocked)",
                      f"wavelength_nm: {args.wavelength_nm:g}",
-                     f"average_count: {args.average_count}"],
+                     f"average_count: {average_count}"],
                     "dark", read_temperature=log_temperature,
                 )
                 if dark_powers.size:
