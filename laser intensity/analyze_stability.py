@@ -724,10 +724,14 @@ def collect_warnings(analysis, run: Run, args) -> list:
             f"the warm-up."
         )
 
-    if not meta.get("zeroed"):
+    if not meta.get("zeroed") and analysis["dark"]["available"]:
+        dark = analysis["dark"]
         warnings.append(
-            "The metadata does not record a dark-offset adjustment. Zero with "
-            "the beam blocked before a run you intend to quote absolutely."
+            f"This run was not zeroed, so the {dark['mean_w'] * 1e9:+.3f} nW dark "
+            f"offset above is still sitting in every reading "
+            f"({dark['mean_w'] / analysis['level']['mean_w'] * 100:+.4f} % of "
+            f"signal). Subtract it if you are quoting an absolute power; it "
+            f"cancels in a ratio."
         )
     return warnings
 

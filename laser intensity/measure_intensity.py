@@ -110,8 +110,10 @@ def parse_args(argv=None):
         help="length of the beam-blocked segment; 0 skips it",
     )
     parser.add_argument(
-        "--no_zero", action="store_true",
-        help="do not run the dark-offset adjustment while the beam is blocked",
+        "--zero", action="store_true",
+        help="also run the console's dark-offset adjustment. Off by default: the "
+             "driver's routine reports success it cannot verify and can hang the "
+             "console. Zero from the front panel if you want it, once",
     )
     parser.add_argument(
         "--no_prompt", action="store_true",
@@ -406,10 +408,10 @@ def main(argv=None) -> int:
         # --- now block the beam: zero on that range, then measure the floor
         dark_mean = dark_std = None
         took_dark = False
-        if prompts and (args.dark_s > 0 or not args.no_zero):
+        if prompts and (args.dark_s > 0 or args.zero):
             ask("\nBlock the beam -- light-tight, not just a hand -- then press Enter: ", True)
 
-            if not args.no_zero:
+            if args.zero:
                 print("  Zeroing...")
                 pm.zero()
                 # The driver only reports that the routine FINISHED, never that
@@ -467,7 +469,7 @@ def main(argv=None) -> int:
             "dark_mean_w": dark_mean,
             "dark_std_w": dark_std,
             "dark_duration_s": args.dark_s if took_dark else 0.0,
-            "zeroed": (not args.no_zero) and prompts,
+            "zeroed": args.zero and prompts,
         })
 
         print(f"\nLogging for {args.duration_s:.0f} s "
