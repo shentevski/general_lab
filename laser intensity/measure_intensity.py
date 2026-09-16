@@ -380,15 +380,51 @@ def main(argv=None) -> int:
             )
         print(f"Wavelength:  {pm.wavelength_nm:.1f} nm")
 
-        # --- blocked beam: zero, then measure the detector's own noise floor
+        # --- range FIRST, with the beam still on. The zero offset belongs to
+        # the range it was measured on, so zeroing while auto-range has hunted
+        # down to a sensitive range (which is what a blocked beam makes it do)
+        # and then measuring on a coarser one leaves the console applying the
+        # wrong offset -- negative readings and a blinking ZERO! warning.
+        if args.range_w is not None:
+            pm.power_range_w = args.range_w          # setting it disables auto-range
+            range_mode = "pinned"
+            print(f"Range pinned at {pm.power_range_w:.3e} W")
+        elif args.auto_range:
+            pm.auto_range = True
+            range_mode = "auto"
+            print("Auto-range left ON -- expect steps when the console switches.")
+        else:
+            range_mode = "locked"
+            pm.auto_range = True
+            for _ in range(5):
+                pm.read_power()                       # let it settle on the level
+            locked = pm.power_range_w
+            pm.power_range_w = locked
+            print(f"Range locked at {pm.power_range_w:.3e} W "
+                  f"(reading {pm.read_power() * 1e6:.4f} uW)")
+
+        # --- now block the beam: zero on that range, then measure the floor
         dark_mean = dark_std = None
         took_dark = False
         if prompts and (args.dark_s > 0 or not args.no_zero):
-            ask("\nBlock the beam, then press Enter: ", True)
+            ask("\nBlock the beam -- light-tight, not just a hand -- then press Enter: ", True)
 
             if not args.no_zero:
                 print("  Zeroing...")
                 pm.zero()
+                # The driver only reports that the routine FINISHED, never that
+                # it succeeded, so read back what it actually stored.
+                try:
+                    offset = pm.dark_offset
+                    print(f"  Stored zero offset: {offset * 1e9:+.4f} nW")
+                except (AttributeError, PowerMeterError):
+                    pass
+                settled = pm.read_power()
+                print(f"  Reading with the beam blocked: {settled * 1e9:+.4f} nW")
+                if settled < 0:
+                    print("  !! Negative after zeroing -- the console will show a")
+                    print("     blinking ZERO! warning. Light reached the sensor during")
+                    print("     the zero. Re-block properly and run again.")
 
             if args.dark_s > 0:
                 print(f"  Measuring the dark level for {args.dark_s:.0f} s...")
@@ -406,26 +442,12 @@ def main(argv=None) -> int:
                     dark_std = float(np.std(dark_powers, ddof=1)) if dark_powers.size > 1 else 0.0
                     print(f"  Dark offset {dark_mean * 1e9:+.3f} nW, "
                           f"noise {dark_std * 1e9:.3f} nW rms")
+                    if dark_std > 0 and dark_mean < -3 * dark_std:
+                        print("  !! The dark level is significantly negative: the stored")
+                        print("     zero is too large. Re-zero with the beam properly")
+                        print("     blocked before trusting these numbers.")
 
             ask("Unblock the beam and press Enter to start: ", True)
-
-        # --- range: lock it unless explicitly told otherwise
-        if args.range_w is not None:
-            pm.power_range_w = args.range_w          # setting it disables auto-range
-            range_mode = "pinned"
-            print(f"Range pinned at {pm.power_range_w:.3e} W")
-        elif args.auto_range:
-            pm.auto_range = True
-            range_mode = "auto"
-            print("Auto-range left ON -- expect steps when the console switches.")
-        else:
-            range_mode = "locked"
-            pm.auto_range = True
-            for _ in range(5):
-                pm.read_power()                       # let it settle on the level
-            locked = pm.power_range_w
-            pm.power_range_w = locked
-            print(f"Range locked at {pm.power_range_w:.3e} W")
 
         if args.warmup_s > 0:
             print(f"Settling for {args.warmup_s:.0f} s...")
