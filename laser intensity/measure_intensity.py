@@ -23,9 +23,12 @@ Three things decide whether the data is worth analysing:
 * **The wavelength.** The console keeps whatever was set last -- by the GUI, by
   a previous script -- and a reading at the wrong wavelength is silently wrong,
   not an error. That is why ``--wavelength_nm`` is required.
-* **The range.** Auto-range left on during a long run puts a step into the data
-  every time the console switches range, and that step reads back as "drift".
-  This script locks the range by default; ``--auto_range`` opts out.
+* **The range.** Auto-range is on by default, exactly as in
+  ``examples/log_power.py`` -- the setup here makes no console call that the
+  working example scripts do not make. The cost is that a range switch mid-run
+  puts a step in the data that reads back as "drift"; ``--lock_range`` freezes
+  the range to avoid that, and ``--range_w`` pins one outright. Try those only
+  if the plain run works first.
 * **The averaging.** You should not have to think about this. The meter takes
   3000 hardware samples a second, and ``average_count`` says how many go into
   one reading -- so it is really an integration time. By default this script
@@ -125,8 +128,10 @@ def parse_args(argv=None):
     )
 
     parser.add_argument(
-        "--auto_range", action="store_true",
-        help="leave auto-range on (expect step discontinuities on long runs)",
+        "--lock_range", action="store_true",
+        help="freeze the range where auto-range lands, which avoids range-switch "
+             "steps on long runs. Off by default: it needs a driver call the "
+             "working example scripts never make",
     )
     parser.add_argument(
         "--range_w", type=float, default=None, metavar="W",
@@ -266,10 +271,22 @@ def sample_series(pm, duration_s, interval_s, temperature_every_s, csv_path,
 
 
 def describe(pm, args):
-    """Everything about the instrument state worth freezing into the metadata."""
+    """Instrument state worth freezing into the metadata.
+
+    Metadata is nice to have; the measurement is not. Every optional query is
+    guarded, so a console that refuses one of them costs you a field in the
+    JSON rather than the run you just spent an hour on.
+    """
     identity = pm.identity
     sensor = pm.sensor
-    low, high = pm.wavelength_range_nm
+
+    def maybe(read, default=None):
+        try:
+            return read()
+        except Exception:
+            return default
+
+    low, high = maybe(lambda: pm.wavelength_range_nm, (None, None))
 
     info = {
         "resource_name": pm.resource_name,
@@ -284,26 +301,21 @@ def describe(pm, args):
         "sensor_subtype": sensor.subtype_name,
         "sensor_is_power": sensor.is_power_sensor,
         "sensor_has_temperature": sensor.has_temperature_sensor,
-        "calibration_message": pm.calibration_message,
-        "wavelength_nm": pm.wavelength_nm,
+        # Already part of the sensor read above -- do not query the console again.
+        "calibration_message": sensor.calibration_message,
+        "wavelength_nm": maybe(lambda: pm.wavelength_nm),
         "wavelength_range_nm": [low, high],
-        "power_unit": pm.power_unit,
-        "average_count": pm.average_count,
-        "auto_range": pm.auto_range,
-        "power_range_w": pm.power_range_w,
-        "attenuation_db": pm.attenuation_db,
-        "beam_diameter_mm": pm.beam_diameter_mm,
+        "average_count": maybe(lambda: pm.average_count, args.average_count),
+        "power_unit": maybe(lambda: pm.power_unit, "W"),
+        "auto_range": maybe(lambda: pm.auto_range),
+        "power_range_w": maybe(lambda: pm.power_range_w),
+        "attenuation_db": maybe(lambda: pm.attenuation_db),
+        "beam_diameter_mm": maybe(lambda: pm.beam_diameter_mm),
+        # The raw photocurrent behind the power reading; the analysis turns it
+        # into a shot-noise floor.
+        "photocurrent_a": maybe(lambda: pm.read_current()),
     }
-
     info["integration_time_s"] = info["average_count"] / HARDWARE_SAMPLES_PER_S
-
-    # The raw photocurrent behind the power reading; the analysis turns it into
-    # a shot-noise floor.
-    try:
-        info["photocurrent_a"] = pm.read_current()
-    except PowerMeterError:
-        info["photocurrent_a"] = None
-
     return info
 
 
@@ -347,7 +359,7 @@ def main(argv=None) -> int:
         sensor = pm.sensor
         print(f"Connected to {identity.model} (S/N {identity.serial_number})")
         print(f"Sensor:      {sensor}")
-        print(f"Calibration: {pm.calibration_message}")
+        print(f"Calibration: {sensor.calibration_message}")
 
         # Only heads that report a thermistor may be asked for a temperature.
         log_temperature = (sensor.has_temperature_sensor
@@ -355,7 +367,6 @@ def main(argv=None) -> int:
         if args.temperature_every_s > 0 and not sensor.has_temperature_sensor:
             print("             (no thermistor in this head -- temperature not logged)")
 
-        pm.power_unit = "W"
         pm.wavelength_nm = args.wavelength_nm
         pm.average_count = args.average_count
         integration_s = args.average_count / HARDWARE_SAMPLES_PER_S
@@ -391,19 +402,17 @@ def main(argv=None) -> int:
             pm.power_range_w = args.range_w          # setting it disables auto-range
             range_mode = "pinned"
             print(f"Range pinned at {pm.power_range_w:.3e} W")
-        elif args.auto_range:
-            pm.auto_range = True
-            range_mode = "auto"
-            print("Auto-range left ON -- expect steps when the console switches.")
-        else:
+        elif args.lock_range:
             range_mode = "locked"
             pm.auto_range = True
             for _ in range(5):
                 pm.read_power()                       # let it settle on the level
-            locked = pm.power_range_w
-            pm.power_range_w = locked
-            print(f"Range locked at {pm.power_range_w:.3e} W "
-                  f"(reading {pm.read_power() * 1e6:.4f} uW)")
+            pm.power_range_w = pm.power_range_w      # freeze wherever it landed
+            print(f"Range locked at {pm.power_range_w:.3e} W")
+        else:
+            pm.auto_range = True
+            range_mode = "auto"
+            print(f"Auto-range on (reading {pm.read_power() * 1e6:.4f} uW)")
 
         # --- now block the beam: zero on that range, then measure the floor
         dark_mean = dark_std = None
