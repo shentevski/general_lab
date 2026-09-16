@@ -191,7 +191,7 @@ def sample_series(pm, duration_s, interval_s, temperature_every_s, csv_path,
     powers: list[float] = []
     temps: list[float] = []
 
-    show_progress = sys.stdout.isatty()
+    overwrite = sys.stdout.isatty()
     next_temperature = 0.0
     last_flush = 0.0
     last_print = 0.0
@@ -229,19 +229,21 @@ def sample_series(pm, duration_s, interval_s, temperature_every_s, csv_path,
                     handle.flush()
                     last_flush = elapsed
 
-                if show_progress and elapsed - last_print > 0.25:
+                if elapsed - last_print > (0.25 if overwrite else 2.0):
                     mean = float(np.mean(powers))
-                    print(
-                        f"\r  {progress_label} {elapsed:7.1f}/{duration_s:.0f} s"
-                        f"   now {power * 1e6:10.4f} uW"
-                        f"   mean {mean * 1e6:10.4f} uW",
-                        end="", flush=True,
-                    )
+                    line = (f"  {progress_label} {elapsed:7.1f}/{duration_s:.0f} s"
+                            f"   now {power * 1e6:10.4f} uW"
+                            f"   mean {mean * 1e6:10.4f} uW"
+                            f"   [{len(powers)} samples]")
+                    print(f"\r{line}" if overwrite else line,
+                          end="" if overwrite else "\n", flush=True)
                     last_print = elapsed
 
                 if interval_s > 0:
                     next_sample += interval_s
-                    remaining = next_sample - time.perf_counter()
+                    # Wake at the end of the segment if that comes first.
+                    wake = min(next_sample, start + duration_s)
+                    remaining = wake - time.perf_counter()
                     if remaining > 0:
                         time.sleep(remaining)
         except KeyboardInterrupt:
@@ -324,6 +326,12 @@ def main(argv=None) -> int:
         if not found:
             print("   (none)")
         return 0
+
+    if args.interval_s >= args.duration_s:
+        print(f"--interval_s is {args.interval_s:g} s but --duration_s is only "
+              f"{args.duration_s:g} s, so the run would be a single sample. "
+              f"Did you mean --duration_s {args.interval_s:g}?", file=sys.stderr)
+        return 2
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     stem = run_stem(args)
@@ -423,7 +431,14 @@ def main(argv=None) -> int:
                     print("     the zero. Re-block properly and run again.")
 
             if args.dark_s > 0:
-                print(f"  Measuring the dark level for {args.dark_s:.0f} s...")
+                print("  Letting the console auto-range down to the dark level "
+                      "(this can take a few seconds)...", flush=True)
+                for index in range(8):
+                    settle = pm.read_power()
+                    print(f"    settling {index + 1}/8: {settle * 1e9:+.3f} nW",
+                          flush=True)
+                print(f"  Measuring the dark level for {args.dark_s:.0f} s...",
+                      flush=True)
                 _, dark_powers, _, _ = sample_series(
                     pm, args.dark_s, args.interval_s, args.temperature_every_s,
                     dark_csv,

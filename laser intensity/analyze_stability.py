@@ -665,26 +665,37 @@ def collect_warnings(analysis, run: Run, args) -> list:
             )
 
     # range_mode is what the script chose; auto_range is what the console said.
-    # Prefer the former when it is there, since a driver can lag a range change.
     auto = (meta.get("range_mode") == "auto" if "range_mode" in meta
             else str(meta.get("auto_range", "")).lower() in ("true", "1"))
-    if auto:
-        warnings.append(
-            "Auto-range was ON. Range switches put steps into the data that "
-            "read back as drift -- re-record with the range locked."
-        )
+    if auto and run.residual is not None and run.residual.size > 2:
+        steps = np.abs(np.diff(run.residual))
+        sigma = float(np.std(run.residual, ddof=1))
+        jumps = int(np.sum(steps > 10 * sigma)) if sigma > 0 else 0
+        if jumps:
+            warnings.append(
+                f"Auto-range was on and there are {jumps} single-sample jumps of "
+                f"more than 10 sigma -- almost certainly range switches. They read "
+                f"back as drift. Re-record with --lock_range."
+            )
 
-    duty = acquisition["duty_cycle"]
-    if math.isfinite(duty) and duty < 0.5:
-        caveat = ("" if not acquisition["bandwidth_is_upper_bound"] else
-                  " If the console is on LO (~15 Hz) most of that is already "
-                  "filtered out, so check the panel before worrying.")
+    nyquist = acquisition["sample_rate_hz"] / 2.0
+    if not acquisition["bandwidth_is_upper_bound"]:
+        if acquisition["bandwidth_hz"] > nyquist:
+            warnings.append(
+                f"The console passes {acquisition['bandwidth_hz']:.0f} Hz but you "
+                f"sampled to {nyquist:.1f} Hz, so noise between the two folds back "
+                f"and appears as slow noise. Harmless for drift (white noise folds "
+                f"to white noise), but sample at --interval_s "
+                f"{1 / (2 * acquisition['bandwidth_hz']):.3f} or faster to see that "
+                f"band honestly."
+            )
+    elif math.isfinite(acquisition["duty_cycle"]) and acquisition["duty_cycle"] < 0.5:
         warnings.append(
-            f"The meter integrates only {duty * 100:.1f} % of each sample period: it "
-            f"responds out to ~{acquisition['averaging_bandwidth_hz']:.0f} Hz but you "
-            f"sampled to {acquisition['sample_rate_hz'] / 2:.1f} Hz, so anything in "
-            f"between folds back into the spectrum. For spectral work use "
-            f"--interval_s 0.{caveat}"
+            f"Unknown console bandwidth, so aliasing cannot be ruled out: the "
+            f"averaging alone passes {acquisition['averaging_bandwidth_hz']:.0f} Hz "
+            f"against a {nyquist:.1f} Hz Nyquist. Read the BW setting off the panel "
+            f"and pass --console_bandwidth_hz (15 for LO) to make this check exact: "
+            f"if that number is below {nyquist:.1f} Hz, nothing folds at all."
         )
 
     if acquisition["interval_jitter"] > 0.1:
