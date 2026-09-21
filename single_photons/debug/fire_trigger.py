@@ -43,7 +43,7 @@ while True:
         continue
 
     arduino.reset_input_buffer()  # drop any late reply from a previous shot
-    arduino.write(b"s")           # the sketch listens for "s", whatever FIRE_KEY is
+    arduino.write(FIRE_KEY.encode())
     reply = arduino.readline().decode(errors="ignore").strip()
     shots += 1
 

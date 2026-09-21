@@ -1,11 +1,13 @@
 /* laser_trigger.ino -- Arduino Uno WiFi
  *
- * Waits for the character 's' on the USB serial port, then emits a 5 V,
- * 1 ms pulse on TRIG_PIN to fire the laser.
+ * Emits a 5 V, 1 ms pulse on TRIG_PIN to fire the laser every time a
+ * character arrives on the USB serial port. It does not care which
+ * character: the key that fires is chosen in the Python script.
  *
  * You can drive it two ways:
- *   - open the Arduino IDE Serial Monitor (115200 baud) and type s + ENTER
- *   - let measure_delay.py hold the port and send the 's' for you
+ *   - run debug/fire_trigger.py (or measure_delay.py) and press its fire key
+ *   - open the Arduino IDE Serial Monitor (115200 baud), type one
+ *     character and press ENTER
  * Only one of the two can have the port open at a time.
  *
  * The Arduino's own timing jitter (microseconds) does not matter: the
@@ -28,7 +30,7 @@ void loop() {
   if (Serial.available() == 0) return;
 
   char c = Serial.read();
-  if (c != 's' && c != 'S') return;   // ignore newlines and anything else
+  if (c == '\n' || c == '\r') return;   // ignore line endings from a terminal
 
   for (int i = 0; i < N_PULSES; i++) {
     if (i > 0) delay(PERIOD_MS);

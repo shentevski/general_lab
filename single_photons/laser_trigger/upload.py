@@ -85,5 +85,5 @@ run("compile", "--fqbn", fqbn, str(SKETCH_DIR))
 run("upload", "--fqbn", fqbn, "--port", port, str(SKETCH_DIR))
 
 print(f"\nuploaded to {port}")
-print(f"Test it:  arduino-cli monitor -p {port} -c baudrate=115200   then type s")
+print(f"Test it:  arduino-cli monitor -p {port} -c baudrate=115200   then type any character")
 print(f"Set ARDUINO_PORT = \"{port}\" in measure_delay.py")

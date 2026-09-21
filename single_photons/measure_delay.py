@@ -18,6 +18,7 @@ BINWIDTH = 100
 
 ARDUINO_PORT = "COM3"
 ARDUINO_BAUD = 115200
+FIRE_KEY = "s"
 
 SETTLE = 0.2     
 OUTFILE = "delays_ps.txt"
@@ -47,16 +48,16 @@ meas = TimeTagger.StartStop(tagger, DETECTOR_CH, SYNC_CH, BINWIDTH)
 meas.start()
 
 shots = 0
-print("\n  s  fire the laser      q  stop and save\n")
+print(f"\n  {FIRE_KEY}  fire the laser      q  stop and save\n")
 
 while True:
     key = read_key().lower()
     if key == "q":
         break
-    if key != "s":
+    if key != FIRE_KEY.lower():
         continue
 
-    arduino.write(b"s")
+    arduino.write(FIRE_KEY.encode())
     shots += 1
     time.sleep(SETTLE)
 
