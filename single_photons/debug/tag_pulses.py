@@ -1,6 +1,6 @@
 """Arduino pulse -> Time Tagger test. Windows.
 
-Wire Arduino D8 into TT20 input CH through a 220 ohm series resistor, with
+Wire Arduino D8 into TT20 input CH through a 1 kohm series resistor, with
 Arduino GND on the SMA shield. Press FIRE_KEY to fire: every pulse the
 tagger sees is printed with its width and the time since the previous one.
 
@@ -15,7 +15,7 @@ import TimeTagger
 
 # -------------------- settings --------------------
 CH = 1
-TRIGGER_LEVEL = 0.4      # V, half the ~0.85 V the 220 ohm divider leaves at the input
+TRIGGER_LEVEL = 0.12     # V, half the ~0.24 V the 1 kohm divider leaves at the input
 
 ARDUINO_PORT = "COM3"
 ARDUINO_BAUD = 115200
