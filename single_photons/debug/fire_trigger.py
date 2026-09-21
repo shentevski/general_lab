@@ -1,6 +1,7 @@
 """Fire the laser trigger by hand - no Time Tagger involved. Windows.
 
-Press 's' to send a trigger to the Arduino running laser_trigger.ino.
+Press FIRE_KEY (set below) to send a trigger to the Arduino running
+laser_trigger.ino.
 The pulse itself (1 ms, 5 V on D8 by default) is set in laser_trigger.ino;
 upload.py only flashes it. The sketch answers "fired" once the pulse is
 out, so a missing reply means the Arduino never got the command.
@@ -19,6 +20,9 @@ import time
 import serial
 
 # -------------------- settings --------------------
+FIRE_KEY = "s"           # keyboard key that fires the trigger (q quits)
+# Amplitude cannot be set here: the Arduino pin always outputs 5 V.
+
 ARDUINO_PORT = "COM3"    # same port as in measure_delay.py
 ARDUINO_BAUD = 115200
 REPLY_TIMEOUT = 2.0      # s to wait for "fired"; raise it if N_PULSES in the
@@ -29,17 +33,17 @@ arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=REPLY_TIMEOUT)
 time.sleep(2.0)                   # the board reboots when the port is opened
 
 shots = 0
-print("\n  s  fire the trigger      q  quit\n")
+print(f"\n  {FIRE_KEY}  fire the trigger      q  quit\n")
 
 while True:
     key = msvcrt.getch().decode(errors="ignore").lower()
     if key == "q":
         break
-    if key != "s":
+    if key != FIRE_KEY.lower():
         continue
 
     arduino.reset_input_buffer()  # drop any late reply from a previous shot
-    arduino.write(b"s")
+    arduino.write(b"s")           # the sketch listens for "s", whatever FIRE_KEY is
     reply = arduino.readline().decode(errors="ignore").strip()
     shots += 1
 
