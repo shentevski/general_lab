@@ -20,8 +20,8 @@ import serial
 import TimeTagger
 
 # -------------------- settings --------------------
-CHANNELS = [1, 2, 3, 4, 5, 6]
-TRIGGER_LEVEL = 0.5      # V, applied to every channel
+CHANNELS = [1, 2, 3, 4, 5, 6]    # rising edges only; -1..-6 would be the falling edges
+TRIGGER_LEVEL = 2      # V, applied to every channel
 
 ARDUINO_PORT = "COM4"
 ARDUINO_BAUD = 115200
