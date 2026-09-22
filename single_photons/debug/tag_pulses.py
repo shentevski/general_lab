@@ -15,7 +15,7 @@ import TimeTagger
 
 # -------------------- settings --------------------
 CH = 1
-TRIGGER_LEVEL = 0.12     # V, half the ~0.24 V the 1 kohm divider leaves at the input
+TRIGGER_LEVEL = 0.12     # V
 
 ARDUINO_PORT = "COM3"
 ARDUINO_BAUD = 115200
@@ -26,7 +26,7 @@ tagger = TimeTagger.createTimeTagger()
 tagger.setTriggerLevel(CH, TRIGGER_LEVEL)
 
 arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=2)
-time.sleep(2.0)                  # the board reboots when the port is opened
+time.sleep(2.0)                  
 
 stream = TimeTagger.TimeTagStream(tagger, 1000, [CH, -CH])   # rising and falling edges
 tagger.sync()
