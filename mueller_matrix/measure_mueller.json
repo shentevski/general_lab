@@ -1,0 +1,25 @@
+{
+  "qwp_motor": "28000005",
+  "qwp_stage": "none",
+  "home": true,
+
+  "qwp_steps": 100,
+  "qwp_settle": 0.3,
+
+  "qwp_zero_deg": 93.6,
+  "qwp_retardance_waves": 0.24,
+  "s3_sign": 1,
+
+  "wavelength_nm": 520,
+  "pm_resource": null,
+  "pm_average_count": 300,
+  "power_range_w": null,
+  "zero_meter": true,
+
+  "out": null,
+  "notes": "",
+
+  "simulate": false,
+  "sim_state_error_deg": 3.0,
+  "sim_noise_rel": 0.001
+}

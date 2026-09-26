@@ -1,0 +1,16 @@
+{
+  "run_dir": null,
+
+  "qwp_retardance_waves": null,
+  "qwp_zero_deg": null,
+  "s3_sign": null,
+
+  "exclude_states": [],
+
+  "monte_carlo_trials": 500,
+  "retardance_uncertainty_waves": 0.003333,
+  "qwp_zero_uncertainty_deg": 0.1,
+
+  "show_figures": true,
+  "save_figures": true
+}
