@@ -22,6 +22,11 @@ What it does
   5. Error bars: statistical (Monte Carlo from the fit residuals) and
      systematic (QWP retardance and QWP zero-angle uncertainty).
 
+If the run has a reference meter (laser monitor), every sweep is divided by
+it before anything else, which removes laser drift and noise; a summary of
+what the laser did, and how much the correction helped, is printed and
+plotted. Set use_reference to false to see the result without it.
+
 Output goes to <run_dir>/analysis/: results.json, mueller.csv, figures.
 """
 
@@ -38,8 +43,9 @@ import numpy as np
 
 from polarization_toolkit.analysis.mueller import (differential_decompose,
                                                    lu_chipman, mueller_from_stokes)
-from mueller_common import (cloude, extract_stokes, parse_with_config,
-                            read_sweep, split_retarder, waves_to_deg)
+from mueller_common import (cloude, corrected_power, extract_stokes,
+                            has_reference, parse_with_config, read_sweep,
+                            split_retarder, waves_to_deg)
 
 HERE = Path(__file__).resolve().parent
 
@@ -172,7 +178,7 @@ def stokes_all(states, cal):
         r = {}
         for side in ("in", "out"):
             sw = s[side]
-            r[side] = extract_stokes(sw["power_W"], angles_of(sw),
+            r[side] = extract_stokes(sw["power_used"], angles_of(sw),
                                      qwp_zero_deg=cal["qwp_zero_deg"],
                                      retardance_deg=waves_to_deg(cal["qwp_retardance_waves"]),
                                      s3_sign=cal["s3_sign"])
@@ -213,9 +219,78 @@ def monte_carlo(states, fits, cal, trials, rng):
     return np.array(Ms), ps
 
 
+def apply_reference(states, use_reference):
+    """Set sw["power_used"] on every sweep; returns (used?, present?)."""
+    sweeps = [s[side] for s in states for side in ("in", "out")]
+    present = bool(sweeps) and all(has_reference(sw) for sw in sweeps)
+    used = present and use_reference
+    level = np.mean([sw["ref_W"].mean() for sw in sweeps]) if present else None
+    for sw in sweeps:
+        sw["power_used"] = corrected_power(sw, level) if used else sw["power_W"]
+    return used, present
+
+
+def rel_rms(sw, power, cal):
+    fit = extract_stokes(power, angles_of(sw), qwp_zero_deg=cal["qwp_zero_deg"],
+                         retardance_deg=waves_to_deg(cal["qwp_retardance_waves"]),
+                         s3_sign=cal["s3_sign"])
+    return fit["residual_rms"] / np.mean(power)
+
+
+def laser_summary(states, cal):
+    """What the laser did during the run, from the reference meter."""
+    sweeps = [(s, side, s[side]) for s in states for side in ("in", "out")]
+    means = np.array([sw["ref_W"].mean() for _, _, sw in sweeps])
+    noise = []
+    for _, _, sw in sweeps:
+        t = sw["t_s"] - sw["t_s"][0]
+        r = sw["ref_W"]
+        noise.append(np.std(r - np.polyval(np.polyfit(t, r, 1), t)) / r.mean())
+    t_all = np.concatenate([sw["t_s"] for _, _, sw in sweeps])
+    in_out = [s["out"]["ref_W"].mean() / s["in"]["ref_W"].mean() - 1 for s in states]
+    rms_raw = [rel_rms(sw, sw["power_W"], cal) for _, _, sw in sweeps]
+    rms_cor = [rel_rms(sw, corrected_power(sw, means.mean()), cal) for _, _, sw in sweeps]
+    return {"run_minutes": float((t_all.max() - t_all.min()) / 60),
+            "drift_peak_to_peak": float(np.ptp(means) / means.mean()),
+            "noise_per_reading": float(np.median(noise)),
+            "max_in_out_change": float(np.max(np.abs(in_out))),
+            "in_out_change": [float(x) for x in in_out],
+            "fit_rms_raw": [float(x) for x in rms_raw],
+            "fit_rms_corrected": [float(x) for x in rms_cor]}
+
+
 # --------------------------------------------------------------------------- #
 # figures
 # --------------------------------------------------------------------------- #
+
+
+def fig_laser(plt, states, summary):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
+    level = np.mean([s[side]["ref_W"].mean() for s in states for side in ("in", "out")])
+    for s in states:
+        for side, c in (("in", "C0"), ("out", "C1")):
+            sw = s[side]
+            ax1.plot(sw["t_s"] / 60, 100 * (sw["ref_W"] / level - 1), ".", color=c, ms=2)
+        ax1.text(s["in"]["t_s"][0] / 60, 0, s["label"], fontsize=8, va="bottom")
+    ax1.plot([], [], ".", color="C0", label="input sweeps")
+    ax1.plot([], [], ".", color="C1", label="through-sample sweeps")
+    ax1.axhline(0, color="0.6", lw=0.6)
+    ax1.set_xlabel("time since start of run (min)")
+    ax1.set_ylabel("laser power - mean (%)")
+    ax1.set_title(f"reference meter: drift {100 * summary['drift_peak_to_peak']:.2f}% "
+                  f"peak-to-peak, noise {100 * summary['noise_per_reading']:.2f}% "
+                  f"per reading", fontsize=10)
+    ax1.legend(fontsize=8)
+    names = [f"{s['label']} {side}" for s in states for side in ("in", "out")]
+    x = np.arange(len(names))
+    ax2.bar(x - 0.2, 100 * np.array(summary["fit_rms_raw"]), 0.4, label="raw")
+    ax2.bar(x + 0.2, 100 * np.array(summary["fit_rms_corrected"]), 0.4,
+            label="laser-corrected")
+    ax2.set_xticks(x, names, rotation=60, fontsize=7)
+    ax2.set_ylabel("fit residual rms (%)")
+    ax2.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
 
 
 def fig_matrix(plt, m, m_err, m_sys, title):
@@ -275,8 +350,9 @@ def fig_fits(plt, states, fits):
         for side, c in (("in", "C0"), ("out", "C1")):
             th = angles_of(s[side])
             order = np.argsort(th % 360)
-            ax.plot(th % 360, 1e3 * s[side]["power_W"], ".", color=c, ms=3,
-                    label=f"{side}: rms {100 * f[side]['residual_rms'] / np.mean(s[side]['power_W']):.2f}%")
+            y = s[side]["power_used"]
+            ax.plot(th % 360, 1e3 * y, ".", color=c, ms=3,
+                    label=f"{side}: rms {100 * f[side]['residual_rms'] / np.mean(y):.2f}%")
             ax.plot((th % 360)[order], 1e3 * f[side]["model"][order], "-", color=c, lw=1)
         ax.set_title(f"state {s['index']}: {s['label']}", fontsize=10)
         ax.legend(fontsize=7, loc="upper right")
@@ -304,6 +380,9 @@ def main(argv=None) -> int:
                     help="override the recorded QWP zero; null = recorded")
     ap.add_argument("--s3-sign", type=int, default=None, choices=(1, -1), dest="s3_sign",
                     help="override the recorded S3 sign; null = recorded")
+    ap.add_argument("--use-reference", type=str2bool, default=True, dest="use_reference",
+                    help="divide by the reference (laser monitor) meter when the "
+                         "run has one")
     ap.add_argument("--exclude-states", nargs="*", default=[], dest="exclude_states",
                     help="state numbers or labels to leave out")
     ap.add_argument("--monte-carlo-trials", type=int, default=500,
@@ -337,6 +416,25 @@ def main(argv=None) -> int:
                  if key == "qwp_retardance_waves" else "")
         print(f"  {key:22s} {cal[key]} {unit}{extra}   [{src}]")
 
+    # ---- laser monitor ----------------------------------------------------
+    ref_used, ref_present = apply_reference(states, a.use_reference)
+    laser = laser_summary(states, cal) if ref_present else None
+    print("\nlaser monitor (reference meter)")
+    if not ref_present:
+        print("  none in this run -- laser drift and noise are in every sweep and "
+              "in M00")
+    else:
+        print(f"  run {laser['run_minutes']:.1f} min | laser drift "
+              f"{100 * laser['drift_peak_to_peak']:.2f}% peak-to-peak | noise "
+              f"{100 * laser['noise_per_reading']:.2f}% per reading")
+        print(f"  largest laser change between a state's input and through-sample "
+              f"sweeps: {100 * laser['max_in_out_change']:.2f}%")
+        print(f"  fit rms (median over sweeps): "
+              f"{100 * np.median(laser['fit_rms_raw']):.2f}% raw -> "
+              f"{100 * np.median(laser['fit_rms_corrected']):.2f}% laser-corrected")
+        print("  correction: " + ("ON" if ref_used else
+                                  "OFF (use_reference is false) -- raw powers used"))
+
     # ---- Stokes vectors ---------------------------------------------------
     fits = stokes_all(states, cal)
     S_in = np.array([f["in"]["S"] for f in fits]).T
@@ -347,8 +445,8 @@ def main(argv=None) -> int:
           f"{'through sample S/S0':>30s}  {'DOP':>5}  fit rms in/out")
     for k, (s, f) in enumerate(zip(states, fits)):
         a_, b_ = S_in[:, k] / S_in[0, k], S_out[:, k] / S_out[0, k]
-        rin = 100 * f["in"]["residual_rms"] / np.mean(s["in"]["power_W"])
-        rout = 100 * f["out"]["residual_rms"] / np.mean(s["out"]["power_W"])
+        rin = 100 * f["in"]["residual_rms"] / np.mean(s["in"]["power_used"])
+        rout = 100 * f["out"]["residual_rms"] / np.mean(s["out"]["power_used"])
         dop_in = np.linalg.norm(a_[1:])
         flag = "  <- DOP > 1: retardance / zero wrong?" if dop_in > 1.03 else ""
         print(f"{s['index']:>5} {s['label']:8s} "
@@ -483,6 +581,7 @@ def main(argv=None) -> int:
     out.mkdir(exist_ok=True)
     results = {
         "run_dir": str(run_dir), "calibration_used": cal,
+        "reference_used": ref_used, "laser_monitor": laser,
         "calibration_recorded": rec, "states": labels,
         "excluded": list(a.exclude_states),
         "coverage": {"rank": rank, "condition_number": cond},
@@ -521,6 +620,8 @@ def main(argv=None) -> int:
             "poincare": fig_poincare(plt, S_in, S_out, labels),
             "fits": fig_fits(plt, states, fits),
         }
+        if laser:
+            figs["laser_monitor"] = fig_laser(plt, states, laser)
         if a.save_figures:
             for name, f in figs.items():
                 f.savefig(out / f"{name}.png", dpi=150)

@@ -5,6 +5,7 @@
   "qwp_zero_deg": null,
   "s3_sign": null,
 
+  "use_reference": true,
   "exclude_states": [],
 
   "monte_carlo_trials": 500,

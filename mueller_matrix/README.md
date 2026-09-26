@@ -1,7 +1,13 @@
 # Mueller matrix of a sample
 
 Rotating-QWP polarimeter (QWP on K-Cube 28000005 → fixed analyzer → PM100D + S130VC),
-input states made by hand. Built on `polarization_toolkit`.
+input states made by hand, a second PM100D as laser monitor. Built on `polarization_toolkit`.
+
+```
+laser → polarizer → beamsplitter → HWP (H V D A) / QWP (R L) → [sample] → QWP (rotating) → analyzer → signal meter
+                         │
+                         └→ reference meter (laser monitor)
+```
 
 | file | what |
 |---|---|
@@ -29,6 +35,20 @@ After each state it prints the rank and condition number of what you have. Press
 Enter with no label to finish. Everything is saved after every state, in
 `Desktop/mueller_<date>_<time>/` (`run.json` + one CSV per sweep).
 
+**Laser monitor.** Set `ref_pm_serial` once and the rest is automatic: at every QWP
+step both meters are read at the same moment, over the same averaging window
+(`pm_average_count`), and saved side by side (`power_W`, `ref_W`). The live Stokes
+vectors are already laser-corrected, and after each sweep it prints the laser noise
+and drift, the fit residual before → after correction, and how much the laser changed
+between the input and through-sample sweeps. The first run prints the serial numbers
+of the meters it finds; copy them into the JSON. `ref_pm_serial: null` runs without
+a reference, exactly as before.
+
+The beamsplitter belongs where it is, after the polarizer: the light it splits
+always has the same polarization, so its split ratio does not change with the state
+you prepare. Its effect on the transmitted polarization does not matter either —
+every input state is measured after it.
+
 **The states do not have to be exact** — each is measured, not assumed. What matters:
 
 * the state must not change between its "input" and "through sample" sweeps;
@@ -46,9 +66,12 @@ Key settings in `measure_mueller.json`:
 | `qwp_retardance_waves` | QWP retardance at the wavelength, in waves as the manufacturer quotes it (0.24 = 86.4°) |
 | `s3_sign` | flip to -1 if a known RCP reads as LCP |
 | `qwp_steps` | positions per sweep over 180° |
-| `pm_average_count` | PM100D internal averages per reading |
-| `power_range_w` | `null` = auto range; a number fixes the range (avoids range switching mid-sweep) |
-| `zero_meter` | zero the meter with the beam blocked at the start |
+| `pm_average_count` | PM100D internal averages per reading (both meters) |
+| `pm_serial` | signal meter, after the analyzer (`null` = the one that isn't the reference) |
+| `power_range_w` | signal range: `null` = auto; a number fixes it (avoids range switching mid-sweep) |
+| `ref_pm_serial` | reference meter after the beamsplitter; `null` = no laser monitor |
+| `ref_power_range_w` | reference range, same rules |
+| `zero_meter` | zero the meter(s) at the start — block the laser before the beamsplitter |
 
 ## Analyze
 
@@ -73,12 +96,17 @@ Reported, each with a statistical (Monte Carlo) and a systematic error:
 * **Cloude** — entropy, and whether M is physical (smallest eigenvalue ≥ 0,
   compared with its own noise)
 
-plus a per-state misfit (catches a state that changed or a sample that moved) and a
+When the run has reference data every sweep is divided by it first
+(`use_reference: false` to compare without it), and a laser-monitor summary is printed:
+drift over the run, noise per reading, the largest change between a state's input
+and through-sample sweeps, and the fit residual raw → corrected.
+
+Plus a per-state misfit (catches a state that changed or a sample that moved) and a
 short verdict. Systematic errors are the WORST CASE over the calibration
 tolerances `retardance_uncertainty_waves` (default λ/300) and
 `qwp_zero_uncertainty_deg` (default 0.1°): each error alone at ± its limit, and both
 together at every sign combination, re-analysed; the largest shift is reported. Output in `<run_dir>/analysis/`: `results.json`,
-`mueller.csv`, `mueller_matrix.png`, `poincare.png`, `fits.png`.
+`mueller.csv`, `mueller_matrix.png`, `poincare.png`, `fits.png`, `laser_monitor.png`.
 
 ## The calibration trap
 

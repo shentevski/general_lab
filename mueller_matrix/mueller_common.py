@@ -159,20 +159,46 @@ def cloude(M):
 # sweep files
 # --------------------------------------------------------------------------- #
 
-SWEEP_COLUMNS = ("commanded_deg", "measured_deg", "power_W", "t_s")
+# ref_W: the reference (laser monitor) meter, read at the same moment as
+# power_W; NaN when no reference meter was used. t_s: seconds since the
+# start of the run, so all sweeps of a run share one time axis.
+SWEEP_COLUMNS = ("commanded_deg", "measured_deg", "power_W", "ref_W", "t_s")
 
 
-def write_sweep(path: Path, commanded, measured, power, t):
+def write_sweep(path: Path, commanded, measured, power, ref, t):
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(SWEEP_COLUMNS)
-        for row in zip(commanded, measured, power, t):
+        for row in zip(commanded, measured, power, ref, t):
             w.writerow([f"{v:.9g}" for v in row])
 
 
 def read_sweep(path: Path) -> dict:
     d = np.genfromtxt(path, delimiter=",", names=True)
-    return {k: np.atleast_1d(d[k]).astype(float) for k in SWEEP_COLUMNS}
+    n = np.atleast_1d(d).size
+    return {k: (np.atleast_1d(d[k]).astype(float) if k in d.dtype.names
+                else np.full(n, np.nan))            # older runs: no ref_W
+            for k in SWEEP_COLUMNS}
+
+
+def has_reference(sweep: dict) -> bool:
+    r = sweep["ref_W"]
+    return bool(np.isfinite(r).all() and (r > 0).all())
+
+
+def corrected_power(sweep: dict, ref_level: float | None = None):
+    """Signal power with the laser fluctuations divided out.
+
+    power_W / ref_W removes everything the two meters see in common --
+    laser power drift and noise. Multiplying by ref_level (the run's mean
+    reference power) keeps the result in watts at the average laser power,
+    so every sweep of a run is on the same scale and M00 stays a
+    transmittance. Without a reference the raw power is returned.
+    """
+    if not has_reference(sweep):
+        return sweep["power_W"]
+    level = np.mean(sweep["ref_W"]) if ref_level is None else ref_level
+    return sweep["power_W"] / sweep["ref_W"] * level
 
 
 def waves_to_deg(waves: float) -> float:
