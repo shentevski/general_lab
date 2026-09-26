@@ -296,10 +296,11 @@ class SimRig:
 # --------------------------------------------------------------------------- #
 
 
-def sweep(rig, a, tag):
-    """One full QWP sweep -> dict with the sweep CSV columns."""
+def sweep(rig, a, tag, span_deg=360.0):
+    """One QWP sweep of qwp_steps positions over span_deg -> dict with the
+    sweep CSV columns. 360 deg also separates beam walk (360-deg period)."""
     n = int(a.qwp_steps)
-    step = 180.0 / n
+    step = span_deg / n
     sw = {"commanded_deg": a.qwp_zero_deg + np.arange(n) * step,
           "measured_deg": np.empty(n), "power_W": np.empty(n),
           "ref_W": np.empty(n), "t_s": np.empty(n)}
@@ -363,7 +364,10 @@ def main(argv=None) -> int:
     ap.add_argument("--home", type=lambda s: str(s).lower() in ("1", "true", "yes"),
                     default=True)
     ap.add_argument("--qwp-steps", type=int, default=100, dest="qwp_steps",
-                    help="QWP positions per sweep (a count, over 180 deg)")
+                    help="QWP positions per sweep (a count, spread over qwp_sweep_deg)")
+    ap.add_argument("--qwp-sweep-deg", type=float, default=360.0, dest="qwp_sweep_deg",
+                    help="QWP sweep span: 360 (a full turn, beam walk separated) "
+                         "or 180")
     ap.add_argument("--qwp-settle", type=float, default=0.3, dest="qwp_settle")
     ap.add_argument("--qwp-zero-deg", type=float, default=93.6, dest="qwp_zero_deg",
                     help="stage angle at which the QWP is aligned with the analyzer")
@@ -408,7 +412,8 @@ def main(argv=None) -> int:
     print(f"\nrun folder : {run}")
     print(f"PSA QWP    : zero at {a.qwp_zero_deg:g} deg, retardance "
           f"{a.qwp_retardance_waves:g} waves = {delta:.2f} deg")
-    print(f"sweep      : {a.qwp_steps} steps over 180 deg, {a.wavelength_nm:g} nm\n")
+    print(f"sweep      : {a.qwp_steps} steps over {a.qwp_sweep_deg:g} deg "
+          f"({a.qwp_sweep_deg / a.qwp_steps:.2f} deg each), {a.wavelength_nm:g} nm\n")
 
     meta = {"kind": "mueller_powermeter",
             "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -418,7 +423,7 @@ def main(argv=None) -> int:
                             "qwp_retardance_waves": a.qwp_retardance_waves,
                             "s3_sign": a.s3_sign, "analyzer_deg": 0.0,
                             "wavelength_nm": a.wavelength_nm},
-            "notes": a.notes, "states": []}
+            "qwp_sweep_deg": a.qwp_sweep_deg, "notes": a.notes, "states": []}
 
     rig = SimRig(a) if a.simulate else Rig(a)
     with rig as r:
@@ -460,7 +465,7 @@ def main(argv=None) -> int:
                      "output")):
                 input(prompt)
                 r.set_sample(side == "out")
-                sw = sweep(r, a, tag)
+                sw = sweep(r, a, tag, a.qwp_sweep_deg)
                 write_sweep(run / f"state_{idx:02d}_{side}.csv", sw["commanded_deg"],
                             sw["measured_deg"], sw["power_W"], sw["ref_W"], sw["t_s"])
                 f = analyse_sweep(sw, a)

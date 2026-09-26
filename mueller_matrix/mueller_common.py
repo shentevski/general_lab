@@ -61,8 +61,16 @@ def parse_with_config(ap, argv, default_cfg: Path):
 # --------------------------------------------------------------------------- #
 
 
+def full_turn(angles_deg) -> bool:
+    """True when a sweep of evenly spaced positions covers a whole QWP turn.
+    Works on encoder readings that wrap at 360."""
+    a = np.unwrap(np.deg2rad(np.asarray(angles_deg, float)))
+    n = a.size
+    return n > 1 and np.rad2deg(abs(a[-1] - a[0])) * n / (n - 1) >= 359.0
+
+
 def extract_stokes(power, angles_deg, *, qwp_zero_deg, retardance_deg,
-                   s3_sign=1):
+                   s3_sign=1, walk=None):
     """Least-squares Stokes vector from one QWP sweep.
 
     The intensity behind a rotating retarder of retardance delta and an
@@ -75,20 +83,43 @@ def extract_stokes(power, angles_deg, *, qwp_zero_deg, retardance_deg,
     assuming a perfect quarter-wave. At delta = 90 deg it reduces to the
     toolkit's own projection (checked in _self_check).
 
-    Returns dict: S (4,), coeffs (5,), model (K,), residual_rms.
+    walk: also fit the odd harmonics t, 3t, 5t. Polarization only ever
+    produces even ones (0, 2t, 4t), so anything repeating once per turn is
+    not polarization -- beam walk from a wedged or tilted QWP, moving the
+    beam on the detector (it multiplies the signal, so it lands on 1t, 3t
+    and 5t). Only over a full turn, where odd and even harmonics are
+    orthogonal: they then change the residual (and so the error bars), not
+    S. Over 180 deg they cannot be separated and bias S instead. None =
+    automatically when the sweep covers a full turn.
+
+    Returns dict: S (4,), coeffs (5,), walk (0 or 6,), model (K,), residual_rms.
     """
     y = np.asarray(power, float)
     theta = np.deg2rad(np.asarray(angles_deg, float) - qwp_zero_deg)
     A = design_matrix(theta)
-    c = np.linalg.pinv(A) @ y
+    if walk is None:
+        walk = full_turn(angles_deg)
+    if walk:
+        A = np.column_stack([A] + [f(k * theta) for k in (1, 3, 5)
+                                   for f in (np.cos, np.sin)])
+    coef = np.linalg.pinv(A) @ y
+    c = coef[:5]
+    model = A @ coef
+    return {"S": stokes_from_coeffs(c, retardance_deg, s3_sign), "coeffs": c,
+            "walk": coef[5:], "model": model,
+            "residual_rms": float(np.sqrt(np.mean((y - model) ** 2)))}
+
+
+def stokes_from_coeffs(c, retardance_deg, s3_sign=1):
+    """Stokes vector from the fitted coefficients c0..c4 of one sweep (the
+    inversion written out in extract_stokes). Separate so that a fit with
+    extra terms, or a scan over the retardance, uses the same maths."""
     cd, sd = np.cos(np.deg2rad(retardance_deg)), np.sin(np.deg2rad(retardance_deg))
     S1 = 4 * c[4] / (1 - cd)
     S2 = 4 * c[3] / (1 - cd)
     S3 = s3_sign * 2 * c[1] / sd
     S0 = 2 * c[0] - S1 * (1 + cd) / 2
-    model = A @ c
-    return {"S": np.array([S0, S1, S2, S3]), "coeffs": c, "model": model,
-            "residual_rms": float(np.sqrt(np.mean((y - model) ** 2)))}
+    return np.array([S0, S1, S2, S3])
 
 
 # --------------------------------------------------------------------------- #

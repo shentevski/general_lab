@@ -13,7 +13,8 @@ laser → polarizer → beamsplitter → HWP (H V D A) / QWP (R L) → [sample] 
 |---|---|
 | `measure_mueller.py` + `measure_mueller.json` | interactive measurement |
 | `analyze_mueller.py` + `analyze_mueller.json` | M, decompositions, error bars, figures |
-| `mueller_common.py` | Stokes extraction shared by both (one copy of the maths) |
+| `QWP_analyzer_characterization.py` + `.json` | calibrates the polarimeter itself: QWP zero and retardance, beam walk, analyzer leak |
+| `mueller_common.py` | Stokes extraction shared by all (one copy of the maths) |
 
 Both scripts read their JSON automatically. A flag on the command line overrides
 the JSON for that run; `--config other.json` uses a different file. A misspelled
@@ -65,7 +66,8 @@ Key settings in `measure_mueller.json`:
 | `qwp_zero_deg` | stage reading where the QWP fast axis is along the analyzer (93.6) |
 | `qwp_retardance_waves` | QWP retardance at the wavelength, in waves as the manufacturer quotes it (0.24 = 86.4°) |
 | `s3_sign` | flip to -1 if a known RCP reads as LCP |
-| `qwp_steps` | positions per sweep over 180° |
+| `qwp_sweep_deg` | sweep span, 360 (a full turn) or 180 — over a full turn the beam-walk term is fitted separately |
+| `qwp_steps` | positions per sweep, spread over `qwp_sweep_deg` (100 over 360° = 3.6° steps) |
 | `pm_average_count` | PM100D internal averages per reading (both meters) |
 | `pm_serial` | signal meter, after the analyzer (`null` = the one that isn't the reference) |
 | `power_range_w` | signal range: `null` = auto; a number fixes it (avoids range switching mid-sweep) |
@@ -107,6 +109,37 @@ tolerances `retardance_uncertainty_waves` (default λ/300) and
 `qwp_zero_uncertainty_deg` (default 0.1°): each error alone at ± its limit, and both
 together at every sign combination, re-analysed; the largest shift is reported. Output in `<run_dir>/analysis/`: `results.json`,
 `mueller.csv`, `mueller_matrix.png`, `poincare.png`, `fits.png`, `laser_monitor.png`.
+
+## Characterize the polarimeter
+
+```
+python QWP_analyzer_characterization.py                 # measure, then analyse (--simulate to rehearse)
+python QWP_analyzer_characterization.py <run_dir> ...   # analyse existing runs (Mueller runs too)
+```
+
+Measures the two numbers every Stokes vector depends on, `qwp_zero_deg` and
+`qwp_retardance_waves`, from the setup itself. **No sample in the beam.** Every
+state from laser → polarizer → wave plates is fully polarized (DOP = 1), so
+whatever differs from that is the polarimeter. Each state is swept `repeats`
+times (default 10) without touching anything, over 360° by default.
+
+| state | what it calibrates | how |
+|---|---|---|
+| **H** (state QWP out, HWP for max signal) | QWP retardance | the depth of its sweep is cos²(δ/2); DOP moves 3.5 % per degree |
+| **R** or **L** | QWP zero | a zero error ε gives the S3 term a cos 2θ part, c2/c1 = −tan 2ε, independent of retardance and power |
+| D / A (optional) | cross-check | must give the same retardance as H — their disagreement is the real accuracy |
+| V (optional) | analyzer leak | upper bound on 1 / extinction ratio |
+
+Also reported: beam walk (the 360°-period term, and first vs second half turn),
+the cos 2θ term that a zero error does not explain, whether the fit residual is noise
+or systematic, and how much light from the polarimeter reaches the reference meter
+(the wire grid reflects the rejected polarization back).
+
+Hardware settings and the calibration currently assumed are read from
+`measure_mueller.json`; `QWP_analyzer_characterization.json` holds only this
+script's settings. At the end it prints the values to paste into
+`measure_mueller.json` and `analyze_mueller.json`, with tolerances. Output in
+`<run>/characterization/`.
 
 ## The calibration trap
 

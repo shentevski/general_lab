@@ -4,6 +4,7 @@
   "home": true,
 
   "qwp_steps": 100,
+  "qwp_sweep_deg": 360,
   "qwp_settle": 0.3,
 
   "qwp_zero_deg": 93.6,
