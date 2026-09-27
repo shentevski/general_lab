@@ -13,9 +13,11 @@ or Mueller runs -- of a Mueller run the input sweeps (sample out) are used.
 
 The idea
   NO SAMPLE in the beam. Every input state comes from laser -> polarizer ->
-  wave plates, so it is fully polarized: its DOP is exactly 1, and anything
-  else is the polarimeter's error. Each state is swept `repeats` times without
-  touching anything.
+  wave plates, so it is fully polarized: DOP = 1 up to the polarizer's leak
+  times the laser's unpolarized fraction (input_dop_min is the worst case),
+  and anything else is the polarimeter's error. Each state is swept `repeats`
+  times without touching anything. The states only need to be approximate:
+  each one is measured, not assumed.
 
   H    (state QWP removed; HWP turned for maximum signal at the QWP zero)
        -> QWP RETARDANCE. The depth of H's sweep is cos^2(delta/2): its DOP
@@ -32,6 +34,16 @@ The idea
   it as its own term and compares the two half turns; 180 deg cannot separate
   it from the Stokes terms.
 
+Error budget, for the zero and the retardance separately
+  statistical      scatter of the repeats of one state (needs repeats)
+  states           half the spread between states -- the real accuracy test
+  cos 2t leftover  a cos(2 theta) term that the zero does not explain (seen in
+                   states without S3) would shift the zero this much
+  zero             the zero's own uncertainty, propagated into the retardance
+  input DOP        if the input states are at input_dop_min instead of 1, the
+                   retardance is higher by this much (one-sided)
+  analyzer leak    the same for the leak measured with V (one-sided)
+
 Output in <run>/characterization/: characterization.json, characterization.png,
 and the values to paste into measure_mueller.json and analyze_mueller.json.
 """
@@ -47,10 +59,9 @@ from pathlib import Path
 
 import numpy as np
 
-from polarization_toolkit.analysis.extract import design_matrix
-from mueller_common import (corrected_power, has_reference, parse_with_config,
-                            read_sweep, stokes_from_coeffs, waves_to_deg,
-                            write_sweep)
+from mueller_common import (corrected_power, extract_stokes, full_turn,
+                            has_reference, parse_with_config, read_sweep,
+                            stokes_from_coeffs, waves_to_deg, write_sweep)
 
 HERE = Path(__file__).resolve().parent
 
@@ -68,17 +79,14 @@ def float_or_none(s):
 # --------------------------------------------------------------------------- #
 
 
-def fit_sweep(power, angles_deg, zero_deg, walk):
-    """Fourier fit of one sweep: c = c0, c1 sin2t, c2 cos2t, c3 sin4t, c4 cos4t,
-    plus the beam-walk terms cos t, sin t when the sweep covers a full turn
-    (over 360 deg they are orthogonal to the rest, so c is unchanged by them)."""
-    theta = np.deg2rad(np.asarray(angles_deg, float) - zero_deg)
-    A = design_matrix(theta)
-    if walk:
-        A = np.column_stack([A, np.cos(theta), np.sin(theta)])
-    coef, *_ = np.linalg.lstsq(A, power, rcond=None)
-    model = A @ coef
-    return {"c": coef[:5], "walk": coef[5:], "model": model, "resid": power - model}
+def fit_sweep(power, angles_deg, zero_deg, walk=None):
+    """The Mueller scripts' own fit (extract_stokes), beam-walk harmonics
+    included over a full turn. Only its coefficients c0..c4 are used: the
+    scans over the retardance convert them with stokes_from_coeffs."""
+    f = extract_stokes(power, angles_deg, qwp_zero_deg=zero_deg,
+                       retardance_deg=90.0, walk=walk)
+    return {"c": f["coeffs"], "walk": f["walk"], "model": f["model"],
+            "resid": np.asarray(power, float) - f["model"]}
 
 
 def zero_offset(c):
@@ -95,10 +103,11 @@ def dop(c, delta_deg, s3_sign=1):
     return float(np.linalg.norm(S[1:]) / S[0])
 
 
-def retardance_from_dop(c, guess_deg, lo=60.0, hi=120.0):
-    """The QWP retardance that makes this fully polarized state's DOP exactly 1,
-    and how much its DOP moves per degree of retardance (its sensitivity)."""
-    f = lambda d: dop(c, d) - 1.0
+def retardance_from_dop(c, guess_deg, target=1.0, lo=60.0, hi=120.0):
+    """The QWP retardance that makes this state's DOP equal `target` (1 for a
+    fully polarized state), and how much its DOP moves per degree of
+    retardance (its sensitivity)."""
+    f = lambda d: dop(c, d) - target
     slope = f(guess_deg + 0.5) - f(guess_deg - 0.5)
     grid = np.arange(lo, hi + 1e-9, 0.5)
     v = np.array([f(g) for g in grid])
@@ -131,29 +140,43 @@ def ref_coupling(sw):
     return float(-c[-1]), float(err)
 
 
-def wstats(x, w):
-    """Weighted mean, weighted spread, and standard error of the mean."""
-    x, w = np.asarray(x, float), np.asarray(w, float)
-    m = float(np.sum(w * x) / np.sum(w))
-    if x.size < 2:
-        return m, float("nan"), float("nan")
-    sd = float(np.sqrt(np.sum(w * (x - m) ** 2) / np.sum(w)))
-    n_eff = w.sum() ** 2 / np.sum(w ** 2)
-    return m, sd, sd / np.sqrt(max(n_eff - 1, 1))
+def combine(items, key, weight):
+    """Weighted mean over sweeps, with its error split in two:
+
+    stat    scatter of the repeats WITHIN each state, as an error of the mean
+            (nan when no state was repeated)
+    states  half the spread between the per-state means: what a perfect
+            polarimeter would make zero, so the test of accuracy (nan for one state)
+    """
+    x = np.array([s[key] for s in items], float)
+    w = np.array([s[weight] for s in items], float)
+    labels = [s["label"] for s in items]
+    mean = float(np.sum(w * x) / np.sum(w))
+    per = {}
+    for lab in dict.fromkeys(labels):
+        m = np.array([l == lab for l in labels])
+        pm = float(np.sum(w[m] * x[m]) / np.sum(w[m]))
+        sp = (float(np.sqrt(np.sum(w[m] * (x[m] - pm) ** 2) / np.sum(w[m])))
+              if m.sum() > 1 else float("nan"))
+        per[lab] = {"mean": pm, "spread": sp, "n": int(m.sum())}
+    dof = len(x) - len(per)
+    stat = float("nan")
+    if dof > 0:
+        r = x - np.array([per[l]["mean"] for l in labels])
+        sd = np.sqrt(np.sum(w * r ** 2) / np.sum(w) * len(x) / dof)
+        stat = float(sd / np.sqrt(w.sum() ** 2 / np.sum(w ** 2)))
+    states = 0.5 * float(np.ptp([v["mean"] for v in per.values()])) if len(per) > 1 else float("nan")
+    return mean, stat, states, per
 
 
 def _num(x, fmt="{:.3f}"):
     return fmt.format(x) if np.isfinite(x) else "-"
 
 
-def by_state(items, key, weight):
-    """Per-label (mean, spread, count), in order of first appearance."""
-    out = {}
-    for lab in dict.fromkeys(s["label"] for s in items):
-        grp = [s for s in items if s["label"] == lab]
-        m, sd, _ = wstats([s[key] for s in grp], [s[weight] for s in grp])
-        out[lab] = (m, sd, len(grp))
-    return out
+def quad(*terms):
+    """Quadrature sum of the terms that are known (nan = not measured)."""
+    t = [v for v in terms if v is not None and np.isfinite(v)]
+    return float(np.sqrt(np.sum(np.square(t)))) if t else float("nan")
 
 
 # --------------------------------------------------------------------------- #
@@ -185,7 +208,7 @@ def load_runs(run_dirs, include_through):
             ang = np.where(np.isfinite(sw["measured_deg"]), sw["measured_deg"], com)
             sweeps.append({"run": run.name, "label": lab, "file": f, "sw": sw,
                            "power": corrected_power(sw, level) if ref else sw["power_W"],
-                           "angles": ang, "span": float(span), "walk": span >= 359.0,
+                           "angles": ang, "span": float(span), "walk": full_turn(ang),
                            "laser_corrected": ref, "t_mid": float(np.mean(sw["t_s"]))})
         print(f"  {run.name}: {len(raw)} sweeps"
               f"{' (laser-corrected)' if ref else ' (no reference meter)'}")
@@ -218,34 +241,34 @@ def analyse(run_dirs, a, out_dir: Path):
         z1 = a.fix_zero_deg
         zero.update(value=z1, source="fix_zero_deg")
     elif zs:
-        z1, sd, sem = wstats([s["zero"] for s in zs], [s["w_zero"] for s in zs])
-        per = by_state(zs, "zero", "w_zero")
-        spread = 0.5 * np.ptp([v[0] for v in per.values()]) if len(per) > 1 else float("nan")
-        zero.update(value=z1, spread=sd, stat=sem, state_spread=spread,
-                    per_state={k: {"mean": v[0], "spread": v[1], "n": v[2]}
-                               for k, v in per.items()}, source="S3-term phase")
+        z1, stat, states, per = combine(zs, "zero", "w_zero")
+        zero.update(value=z1, stat=stat, state_spread=states, per_state=per,
+                    source="S3-term phase")
     else:
         z1 = z0
         zero.update(value=z0, source="assumed (no sweep with |S3| > s3_min: "
                                      "measure R or L to calibrate the zero)")
 
     # ---- 2. QWP retardance: DOP = 1, at the zero just found -----------------
+    def retardances(zero_deg, target):
+        """Per-sweep retardance for a given zero and DOP target."""
+        out = []
+        for s in sweeps:
+            c = (s["fit"]["c"] if zero_deg == z1 else
+                 fit_sweep(s["power"], s["angles"], zero_deg, s["walk"])["c"])
+            out.append(retardance_from_dop(c, d0, target))
+        return out
+
     for s in sweeps:
         s["fit"] = fit_sweep(s["power"], s["angles"], z1, s["walk"])
-        s["delta"], s["slope"] = retardance_from_dop(s["fit"]["c"], d0)
-        s["w_delta"] = s["slope"] ** 2
+    for s, (d, slope) in zip(sweeps, retardances(z1, 1.0)):
+        s["delta"], s["slope"], s["w_delta"] = d, slope, slope ** 2
     ds = [s for s in sweeps if abs(s["slope"]) >= a.min_dop_slope and np.isfinite(s["delta"])]
     ret = {"assumed_deg": d0, "n": len(ds)}
     if ds:
-        d1, sd, sem = wstats([s["delta"] for s in ds], [s["w_delta"] for s in ds])
-        per = by_state(ds, "delta", "w_delta")
-        spread = 0.5 * np.ptp([v[0] for v in per.values()]) if len(per) > 1 else float("nan")
-        total = float(np.hypot(sem if np.isfinite(sem) else 0.0,
-                               spread if np.isfinite(spread) else 0.0))
-        ret.update(value_deg=d1, value_waves=d1 / 360.0, spread=sd, stat=sem,
-                   state_spread=spread, total=total,
-                   per_state={k: {"mean": v[0], "spread": v[1], "n": v[2]}
-                              for k, v in per.items()})
+        d1, stat, states, per = combine(ds, "delta", "w_delta")
+        ret.update(value_deg=d1, value_waves=d1 / 360.0, stat=stat,
+                   state_spread=states, per_state=per)
     else:
         d1 = d0
         ret.update(value_deg=d0, value_waves=d0 / 360.0,
@@ -259,7 +282,9 @@ def analyse(run_dirs, a, out_dir: Path):
         s["dop"] = float(np.linalg.norm(S[1:]) / S[0])
         s["S0"] = float(S[0])
         s["c2_rel"] = float(f["c"][2] / f["c"][0])
-        s["walk_rel"] = float(np.hypot(*f["walk"]) / f["c"][0]) if s["walk"] else float("nan")
+        # rms of the odd-harmonic (1, 3, 5 theta) part: what repeats once per turn
+        s["walk_rel"] = (float(np.sqrt(np.sum(np.square(f["walk"])) / 2) / f["c"][0])
+                         if s["walk"] else float("nan"))
         r = f["resid"]
         s["resid_rel"] = float(np.std(r) / f["c"][0])
         s["resid_autocorr"] = float(np.corrcoef(r[:-1], r[1:])[0, 1]) if np.std(r) > 0 else 0.0
@@ -284,14 +309,48 @@ def analyse(run_dirs, a, out_dir: Path):
     leak = (min(float(np.min(s["power"]) / s["S0"]) for s in vlike) if vlike else float("nan"))
     walks = [s for s in sweeps if s["walk"]]
     refs = [s for s in sweeps if np.isfinite(s["k_ref"])]
+    in_zs, in_ds = {id(s) for s in zs}, {id(s) for s in ds}
+    nan = float("nan")
+
+    # ---- 4. error budget ---------------------------------------------------
+    # zero: a cos(2t) term that is not a zero error (it shows in states without
+    # S3) shifts a sweep's zero by ~ 0.5 * c2 / (c1/c0) rad; weight like the mean
+    zero["c2_leftover"] = nan
+    if zs and low_s3 and a.fix_zero_deg is None:
+        w = np.array([s["w_zero"] for s in zs])
+        zero["c2_leftover"] = float(np.degrees(0.5 * rms(low_s3) * np.sum(w / np.sqrt(w)) / np.sum(w)))
+    zero["total"] = (quad(zero.get("stat", nan), zero.get("state_spread", nan), zero["c2_leftover"])
+                     if "per_state" in zero else nan)
+
+    for key in ("from_zero", "input_dop", "analyzer_leak"):
+        ret[key] = nan
+    if ds:
+        idx = [i for i, s in enumerate(sweeps) if id(s) in in_ds]
+        wts = np.array([sweeps[i]["w_delta"] for i in idx])
+
+        def mean_of(results):
+            v = np.array([results[i][0] for i in idx])
+            ok = np.isfinite(v)
+            return float(np.sum(wts[ok] * v[ok]) / np.sum(wts[ok])) if ok.any() else nan
+
+        sz = zero["total"]
+        if np.isfinite(sz) and sz > 0:
+            ret["from_zero"] = 0.5 * abs(mean_of(retardances(z1 + sz, 1.0))
+                                         - mean_of(retardances(z1 - sz, 1.0)))
+        # one-sided: a true DOP below 1 means the real retardance is higher
+        ret["input_dop"] = mean_of(retardances(z1, a.input_dop_min)) - d1
+        if np.isfinite(leak):
+            ret["analyzer_leak"] = mean_of(retardances(z1, 1.0 - leak)) - d1
+        ret["total"] = quad(ret.get("stat", nan), ret.get("state_spread", nan),
+                            ret["from_zero"], ret["input_dop"], ret["analyzer_leak"])
 
     # ---- report ------------------------------------------------------------
     print(f"\n{'#':>3} {'run':>6} {'state':6s} {'S1/S0':>7} {'S2/S0':>7} {'S3/S0':>7} "
           f"{'DOP':>7} {'zero':>7} {'retard':>7} {'dDOP/deg':>8} {'cos2t':>7} "
           f"{'walk':>6} {'halves':>6}")
     for i, s in enumerate(sweeps):
-        z = f"{s['zero']:7.2f}" if s in zs else f"{'-':>7}"
-        d = f"{s['delta']:7.2f}" if s in ds else f"{'-':>7}"
+        z = f"{s['zero']:7.2f}" if id(s) in in_zs else f"{'-':>7}"
+        d = f"{s['delta']:7.2f}" if id(s) in in_ds else f"{'-':>7}"
         w = f"{100 * s['walk_rel']:5.2f}%" if s["walk"] else f"{'-':>6}"
         h = f"{s['half_diff']:6.3f}" if s["walk"] else f"{'-':>6}"
         print(f"{i + 1:>3} {s['run'][-6:]:>6} {s['label']:6s} {s['S'][1]:+7.3f} "
@@ -301,27 +360,41 @@ def analyse(run_dirs, a, out_dir: Path):
     print("\nQWP ZERO  (phase of the S3 term; needs R or L)")
     if "per_state" in zero:
         for k, v in zero["per_state"].items():
-            print(f"  {k:8s} {v['mean']:8.3f} deg   spread {_num(v['spread'])}   ({v['n']} sweeps)")
-        ss = (f"   ± {zero['state_spread']:.3f} state-to-state"
-              if np.isfinite(zero["state_spread"]) else "")
-        print(f"  zero     {z1:8.3f} deg   ± {zero['stat']:.3f} stat{ss}   "
-              f"(assumed {z0:g})")
+            print(f"  {k:8s} {v['mean']:8.3f} deg   repeats scatter {_num(v['spread'])}   "
+                  f"({v['n']} sweeps)")
+        print(f"  zero     {z1:8.3f} deg   (assumed {z0:g})")
     else:
         print(f"  {zero['value']:.3f} deg -- {zero['source']}")
 
     print("\nQWP RETARDANCE  (DOP = 1; needs H, cross-checked by D / A)")
     if "per_state" in ret:
         for k, v in ret["per_state"].items():
-            print(f"  {k:8s} {v['mean']:8.3f} deg   spread {_num(v['spread'])}   ({v['n']} sweeps)")
-        print(f"  retardance {d1:.3f} deg = {d1 / 360:.5f} waves   "
-              f"± {ret['stat']:.3f} stat   (assumed {d0:.2f} deg)")
-        if np.isfinite(ret["state_spread"]):
-            print(f"  states disagree by ± {ret['state_spread']:.3f} deg -- this, not the "
-                  f"stat error, is the accuracy. Total ± {ret['total']:.3f} deg")
-        else:
-            print("  only one sensitive state: accuracy NOT checked -- add D or A")
+            print(f"  {k:8s} {v['mean']:8.3f} deg   repeats scatter {_num(v['spread'])}   "
+                  f"({v['n']} sweeps)")
+        print(f"  retardance {d1:.3f} deg = {d1 / 360:.5f} waves   (assumed {d0:.2f} deg)")
     else:
         print(f"  {ret['note']}")
+
+    print(f"\nERROR BUDGET{'':30s}{'zero (deg)':>12}{'retardance (deg)':>18}")
+    rows = [("statistical (scatter of repeats)", zero.get("stat", nan), ret.get("stat", nan)),
+            ("disagreement between states", zero.get("state_spread", nan),
+             ret.get("state_spread", nan)),
+            ("cos 2t the zero does not explain", zero["c2_leftover"], None),
+            ("zero uncertainty, propagated", None, ret["from_zero"]),
+            (f"input DOP down to {a.input_dop_min:g} (one-sided +)", None, ret["input_dop"]),
+            ("analyzer leak (one-sided +)", None, ret["analyzer_leak"])]
+    cell = lambda v: f"{'':>12}" if v is None else f"{_num(v):>12}"
+    for name, zv, dv in rows:
+        print(f"  {name:40s}{cell(zv)}{cell(dv):>18}")
+    print(f"  {'total (quadrature)':40s}{cell(zero['total'])}{cell(ret.get('total', nan)):>18}")
+    if "per_state" in ret and not np.isfinite(ret.get("state_spread", nan)):
+        print("  only one state calibrates the retardance: its accuracy is NOT checked "
+              "-- add D or A")
+    if "per_state" in ret and not np.isfinite(ret.get("stat", nan)):
+        print("  no state was repeated: the statistical part is not measured "
+              "(repeats >= 2)")
+    if "per_state" in zero and not np.isfinite(zero.get("state_spread", nan)):
+        print("  only one state calibrates the zero: measure both R and L")
 
     print("\nWHAT IS LEFT at the new calibration")
     print(f"  DOP - 1 rms over all sweeps: {100 * dop_before:.2f}% at the assumed "
@@ -335,8 +408,9 @@ def analyse(run_dirs, a, out_dir: Path):
 
     print("\nBEAM WALK  (360-deg sweeps)")
     if walks:
-        print(f"  cos/sin(theta) term: median {100 * np.median([s['walk_rel'] for s in walks]):.3f}% "
-              f"of c0, max {100 * max(s['walk_rel'] for s in walks):.3f}%")
+        print(f"  once-per-turn part (1, 3, 5 theta), rms: median "
+              f"{100 * np.median([s['walk_rel'] for s in walks]):.3f}% of c0, "
+              f"max {100 * max(s['walk_rel'] for s in walks):.3f}%")
         print(f"  first vs second half turn: |dS|/S0 median "
               f"{np.median([s['half_diff'] for s in walks]):.4f}")
     else:
@@ -360,21 +434,18 @@ def analyse(run_dirs, a, out_dir: Path):
           "(re-analysis of old runs):")
     print(f'  "qwp_zero_deg": {z1:.2f},')
     print(f'  "qwp_retardance_waves": {d1 / 360:.4f},')
-    if "total" in ret and np.isfinite(ret["state_spread"]):
-        # floor 0.05 deg: sweep-to-sweep scatter of the zero seen so far is ~0.05-0.1
-        zu = max(v for v in (zero.get("stat", 0), zero.get("state_spread", 0), 0.05)
-                 if np.isfinite(v))
-        print("and the tolerances into analyze_mueller.json:")
-        print(f'  "retardance_uncertainty_waves": {max(ret["total"], 0.02) / 360:.5f},')
-        print(f'  "qwp_zero_uncertainty_deg": {zu:.3f},')
+    if np.isfinite(ret.get("total", nan)) and np.isfinite(zero["total"]):
+        print("and the tolerances (the totals above) into analyze_mueller.json:")
+        print(f'  "retardance_uncertainty_waves": {ret["total"] / 360:.5f},')
+        print(f'  "qwp_zero_uncertainty_deg": {zero["total"]:.3f},')
 
     # ---- save --------------------------------------------------------------
     out_dir.mkdir(parents=True, exist_ok=True)
     per_sweep = [{"run": s["run"], "label": s["label"], "file": s["file"],
                   "S_normalized": s["S"].tolist(), "dop": s["dop"],
                   "dop_assumed_cal": s["dop_assumed"],
-                  "zero_deg": s["zero"] if s in zs else None,
-                  "retardance_deg": s["delta"] if s in ds else None,
+                  "zero_deg": s["zero"] if id(s) in in_zs else None,
+                  "retardance_deg": s["delta"] if id(s) in in_ds else None,
                   "dop_per_deg_retardance": s["slope"], "cos2t_rel": s["c2_rel"],
                   "walk_rel": s["walk_rel"], "half_turn_diff": s["half_diff"],
                   "resid_rel": s["resid_rel"], "resid_autocorr": s["resid_autocorr"],
@@ -453,7 +524,7 @@ def quick_look(sw, a, span):
     """One line of live feedback, at the ASSUMED zero -- H's retardance barely
     depends on the zero, D/A's does; the analysis at the end corrects both."""
     P = corrected_power(sw) if has_reference(sw) else sw["power_W"]
-    f = fit_sweep(P, sw["measured_deg"], a.qwp_zero_deg, span >= 359.0)
+    f = fit_sweep(P, sw["measured_deg"], a.qwp_zero_deg)
     S = stokes_from_coeffs(f["c"], waves_to_deg(a.qwp_retardance_waves), a.s3_sign)
     n = S / S[0]
     txt = f"S/S0 [{n[1]:+.3f} {n[2]:+.3f} {n[3]:+.3f}]  DOP {np.linalg.norm(n[1:]):.4f}"
@@ -517,10 +588,12 @@ def measure(a) -> Path:
         r.set_sample(False)
         save()
 
-        print("\nNO SAMPLE in the beam for the whole run. Suggested states:\n"
+        print("\nNO SAMPLE in the beam for the whole run. Suggested states "
+              "(approximate is fine -- each is measured):\n"
               "  H    state QWP out, HWP turned for maximum signal -> retardance\n"
-              "  R/L  state QWP in                              -> zero\n"
-              "  D/A  cross-check of the retardance;  V  analyzer leak")
+              "  R/L  state QWP in, as circular as is easy       -> zero\n"
+              "  D/A  cross-check of the retardance;  V  analyzer leak\n"
+              "Don't touch anything while a state's repeats run.")
         idx = 0
         while True:
             label = input(f"\nstate {idx + 1}: set it by hand, then type a label "
@@ -569,6 +642,10 @@ def main(argv=None) -> int:
                          "non-depolarizing sample)")
     ap.add_argument("--fix-zero-deg", type=float_or_none, default=None, dest="fix_zero_deg",
                     help="use this zero instead of estimating it")
+    ap.add_argument("--input-dop-min", type=float, default=0.998, dest="input_dop_min",
+                    help="worst-case DOP of the input states, for the error budget. "
+                         "About 1 - 2/ER of the polarizer: 0.998 for 1000:1, the "
+                         "LPVISC guarantee at 510-520 nm")
     ap.add_argument("--show-figures", type=str2bool, default=True, dest="show_figures")
     ap.add_argument("--save-figures", type=str2bool, default=True, dest="save_figures")
     ap.add_argument("--sim-true-zero-deg", type=float_or_none, default=None,

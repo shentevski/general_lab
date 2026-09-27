@@ -135,6 +135,19 @@ the cos 2θ term that a zero error does not explain, whether the fit residual is
 or systematic, and how much light from the polarimeter reaches the reference meter
 (the wire grid reflects the rejected polarization back).
 
+The states only need to be approximate: each is measured. What matters is not
+touching anything during a state's repeats, H close to the analyzer axis (it is
+the most sensitive state), and R/L reasonably circular.
+
+**Error budget.** Both numbers come with a budget: the scatter of repeats, the
+disagreement between states (the real accuracy test: zero for a polarimeter whose
+only errors are these two numbers), a cos 2θ term the zero doesn't explain, the
+zero's uncertainty propagated into the retardance, and two one-sided terms. The
+input states' DOP is not exactly 1: it is at least `input_dop_min` (default 0.998,
+≈ 1 − 2/ER for a 1000:1 polarizer, the LPVISC guarantee at 510–520 nm), and the
+analyzer leak measured with V lowers every DOP too. Both would make the true
+retardance slightly higher. The totals are what it suggests as tolerances.
+
 Hardware settings and the calibration currently assumed are read from
 `measure_mueller.json`; `QWP_analyzer_characterization.json` holds only this
 script's settings. At the end it prints the values to paste into
