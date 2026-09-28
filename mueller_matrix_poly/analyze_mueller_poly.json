@@ -1,0 +1,27 @@
+{
+  "run_dir": null,
+
+  "calibration_file": null,
+  "qwp_retardance_waves": null,
+  "qwp_zero_deg": null,
+  "zero_source": null,
+  "s3_sign": null,
+
+  "wl_min_nm": 480,
+  "wl_max_nm": 820,
+  "bin_nm": 5,
+  "min_signal_rel": 0.05,
+
+  "use_reference": true,
+  "exclude_states": [],
+
+  "monte_carlo_trials": 200,
+  "retardance_uncertainty_waves": null,
+  "qwp_zero_uncertainty_deg": 0.1,
+
+  "report_wl_nm": [500, 550, 600, 650, 700, 750, 800],
+  "fit_plot_wl_nm": 650,
+
+  "show_figures": true,
+  "save_figures": true
+}

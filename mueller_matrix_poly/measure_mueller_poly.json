@@ -1,0 +1,44 @@
+{
+  "qwp_motor": "28000005",
+  "qwp_stage": "none",
+  "home": true,
+
+  "qwp_steps": 100,
+  "qwp_sweep_deg": 360,
+  "qwp_settle": 0.3,
+
+  "qwp_zero_deg": 93.6,
+  "qwp_retardance_waves": 0.24,
+  "calibration_file": null,
+  "zero_source": "constant",
+  "s3_sign": 1,
+
+  "spectrometer_id": null,
+  "exposure_ms": null,
+  "hw_average": 10,
+  "target_fill": 0.6,
+  "full_scale_counts": 65535,
+  "dark_frames": 3,
+
+  "wl_min_nm": 470,
+  "wl_max_nm": 850,
+  "feedback_bin_nm": 20,
+  "show_wl_nm": [500, 550, 600, 650, 700, 750, 800],
+
+  "ref_pm_serial": null,
+  "ref_wavelength_nm": 620,
+  "pm_average_count": 100,
+  "ref_power_range_w": null,
+  "block_at_start": true,
+
+  "out": null,
+  "notes": "",
+
+  "simulate": false,
+  "sim_state_error_deg": 3.0,
+  "sim_counts_per_ms": 2000,
+  "sim_led_drift_rel": 0.005,
+  "sim_led_noise_rel": 0.001,
+  "sim_polarizer_er": 1000,
+  "sim_stray_rel": 0.002
+}

@@ -1,0 +1,28 @@
+{
+  "run_dirs": [],
+
+  "repeats": 5,
+  "qwp_sweep_deg": 360,
+
+  "wl_min_nm": 470,
+  "wl_max_nm": 850,
+  "bin_nm": 10,
+  "min_signal_rel": 0.05,
+
+  "s3_min": 0.3,
+  "min_dop_slope": 0.01,
+  "search_span_deg": 40,
+  "include_through_sample": false,
+  "fix_zero_deg": null,
+  "zero_smooth_order": 0,
+  "smooth_order": 4,
+  "input_dop_min": 0.998,
+  "compare_file": null,
+
+  "report_wl_nm": [500, 550, 600, 650, 700, 750, 800],
+  "show_figures": true,
+  "save_figures": true,
+
+  "sim_true_zero_offset_deg": -0.7,
+  "sim_true_retardance_scale": 0.985
+}
