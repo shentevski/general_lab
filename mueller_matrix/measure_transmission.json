@@ -1,0 +1,22 @@
+{
+  "cycles": 5,
+  "readings": 20,
+  "settle_s": 1.0,
+
+  "measure_dark": true,
+  "zero_meter": true,
+
+  "compare_run": null,
+
+  "out": null,
+  "notes": "",
+
+  "show_figures": true,
+  "save_figures": true,
+
+  "simulate": false,
+  "sim_transmission": 0.973,
+  "sim_laser_drift_rel": 0.02,
+  "sim_laser_noise_rel": 0.002,
+  "sim_noise_rel": 0.0005
+}
