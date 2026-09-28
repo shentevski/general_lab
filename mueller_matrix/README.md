@@ -14,7 +14,7 @@ laser → polarizer → beamsplitter → HWP (H V D A) / QWP (R L) → [sample] 
 | `measure_mueller.py` + `measure_mueller.json` | interactive measurement |
 | `analyze_mueller.py` + `analyze_mueller.json` | M, decompositions, error bars, figures |
 | `QWP_analyzer_characterization.py` + `.json` | calibrates the polarimeter itself: QWP zero and retardance, beam walk, analyzer leak |
-| `measure_transmission.py` + `.json` | sample transmittance with the two power meters only, no polarimeter (checks M00) |
+| `measure_transmission.py` + `.json` | sample transmittance with one power meter, no polarimeter (checks M00) |
 | `mueller_common.py` | Stokes extraction shared by all (one copy of the maths) |
 
 Both scripts read their JSON automatically. A flag on the command line overrides
@@ -158,19 +158,16 @@ script's settings. At the end it prints the values to paste into
 ## Measure transmittance directly
 
 ```
-python measure_transmission.py            # rehearse first with: --simulate
+python measure_transmission.py
 ```
 
-An independent check of M00. **Take the polarimeter's QWP and analyzer out of the
-beam** (or put the sensor right after the sample): the signal meter must see all the
-light, since a wave plate changes the polarization and anything polarizing after it
-fakes a transmission change. The script asks for the sample out, in, out, in, …, out
-(`cycles` times in): every "in" is bracketed by two "out" readings so slow drift
-cancels, each reading is divided by the reference meter, and the dark offset (beam
-blocked) is subtracted. It prints the transmittance per cycle and in total, with and
-without the reference, and compares with a Mueller run's M00 if `compare_run` is set.
-Meter serials and wavelength come from `measure_mueller.json`. Output in
-`Desktop/transmission_<date>_<time>/`: `run.json`, `readings.csv`, `transmission.png`.
+An independent check of M00 with one power meter (the reference PM unless
+`meter_serial` is set). Put the meter directly behind the sample, with no polarizing
+optics in between. The script zeroes the meter (beam blocked), then asks for the sample
+out, in, out, in, …, out (`cycles` times in); each "in" is compared with the mean of
+the "out" readings just before and after it, so slow laser drift cancels. It prints
+the transmittance per cycle and the mean ± its error, and saves `readings.csv` and
+`run.json` in `Desktop/transmission_<date>_<time>/`.
 
 ## The calibration trap
 
