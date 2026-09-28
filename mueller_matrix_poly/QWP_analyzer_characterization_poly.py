@@ -662,8 +662,9 @@ def measure(a) -> Path:
             np.savez_compressed(run / "sim_truth.npz", **r.truth())
         r.set_sample(False)
         amb = start(r, a)
-        input("\nNO SAMPLE in the beam for the whole run. Set H (both state wave "
-              "plates OUT), then press Enter to check the exposure...")
+        print("\nNO SAMPLE in the beam for the whole run.\nEXPOSURE: set H (both state "
+              "wave plates OUT), then type an exposure -- the script shows how full the "
+              "brightest pixel gets.")
         check_exposure(r, a)
         ambient_report(amb, r, a)
         print(f"  exposure for the whole run: {r.exposure_ms:g} ms x {r.hw_average} frames")

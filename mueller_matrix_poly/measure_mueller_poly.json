@@ -16,7 +16,6 @@
   "spectrometer_id": null,
   "exposure_ms": null,
   "hw_average": 10,
-  "target_fill": 0.6,
   "full_scale_counts": 65535,
   "dark_frames": 3,
 

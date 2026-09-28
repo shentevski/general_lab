@@ -40,10 +40,10 @@ by QWP_analyzer_characterization_poly.py. The file is copied into the run.
 
 Spectrometer
   * ONE exposure for the whole run: the Stokes fit assumes a linear detector,
-    so the counts must stay well below full scale. At the start the script
-    checks the exposure on a bright state (H or R, sample out) and, with
-    exposure_ms null, sets it so the brightest pixel sits at target_fill of
-    full scale. Every spectrum is checked for clipping;
+    so the counts must stay well below full scale. At the start you type the
+    exposure; the script shows how full the brightest pixel gets on a bright
+    state (H or R, sample out) and you keep it or type another (aim for
+    ~50-70 % of full scale). Every spectrum is checked for clipping;
   * a dark (shutter closed) before and after every sweep, interpolated in
     time: a leftover offset looks exactly like lost polarization;
   * raw counts are saved (amplitude correction off, no SDK dark), so the
@@ -442,40 +442,76 @@ def band(wl, a):
     return (wl >= a.wl_min_nm) & (wl <= a.wl_max_nm)
 
 
+def parse_ms(txt):
+    """An exposure typed in ms, or None (with the reason printed)."""
+    try:
+        ms = float(txt)
+    except ValueError:
+        print("  a number of milliseconds, please")
+        return None
+    if not 0.01 <= ms <= 30000:
+        print("  the CCT10 takes 0.01 - 30000 ms")
+        return None
+    return ms
+
+
+def ask_exposure(suggested=None):
+    """Ask until a valid exposure is typed; Enter takes the suggestion, if any."""
+    while True:
+        txt = input("  exposure in ms"
+                    + (f" [Enter = {suggested:g}]" if suggested else "") + ": ").strip()
+        if not txt and suggested:
+            return float(suggested)
+        ms = parse_ms(txt) if txt else None
+        if ms is not None:
+            return ms
+
+
+def brightest(rig, a):
+    """Brightest pixel (raw counts) over a coarse half turn of the QWP -- the
+    current state, sample out -- and whether any spectrum clipped."""
+    raw_max, clip = 0.0, False
+    for k in range(12):                            # 15-deg steps over 180 deg
+        rig.move_to(a.qwp_zero_deg + 15 * k)
+        settle(rig, a)
+        c, _ = rig.read()
+        m = band(rig.wl, a)
+        raw_max = max(raw_max, float(c[m].max()))
+        clip |= bool(clipped(c[m], a.full_scale_counts)[0])
+    return raw_max, clip
+
+
 def check_exposure(rig, a):
-    """Brightest pixel over a coarse half turn (the current state, sample out).
-    exposure_ms null: set the exposure so it sits at target_fill of full scale."""
+    """You enter the exposure. The script shows how bright the brightest pixel
+    gets over a coarse half turn (the current state, sample out) and whether it
+    clips; keep it, or type another. It then stays fixed for the whole run.
+    exposure_ms in the JSON is offered as the suggestion (null = none).
+
+    Aim for the brightest pixel at ~50-70 % of full scale: a clipped spectrum
+    breaks the fit's linear-detector assumption, too little light only adds
+    noise."""
     fs = a.full_scale_counts
-    for attempt in range(6):
-        dark = rig.dark(a.dark_frames)
-        raw_max, sig_max, clip = 0.0, 0.0, False
-        for k in range(12):                        # 15-deg steps over 180 deg
-            rig.move_to(a.qwp_zero_deg + 15 * k)
-            settle(rig, a)
-            c, _ = rig.read()
-            m = band(rig.wl, a)
-            raw_max = max(raw_max, float(c[m].max()))
-            sig_max = max(sig_max, float((c - dark)[m].max()))
-            clip |= bool(clipped(c[m], fs)[0])
+    ms = ask_exposure(a.exposure_ms)
+    while True:
+        rig.set_exposure(ms, a.hw_average)
+        raw_max, clip = brightest(rig, a)
         fill = raw_max / fs
-        print(f"  exposure {rig.exposure_ms:g} ms x {rig.hw_average}: brightest pixel "
-              f"{raw_max:.0f} counts = {100 * fill:.0f}% of full scale"
-              f"{'  CLIPPED' if clip else ''}")
-        if a.exposure_ms is not None:
-            if clip or fill > 0.9:
-                print("  WARNING: at or near full scale -- lower exposure_ms, or set it "
-                      "to null for an automatic choice")
-            elif fill < 0.1:
-                print("  WARNING: under 10% of full scale -- a longer exposure gives "
-                      "less noise")
-            return
-        if not clip and abs(fill - a.target_fill) < 0.1:
-            return
-        offset = float(np.median(dark[band(rig.wl, a)]))
-        want = a.target_fill * fs - offset
-        new = rig.exposure_ms * (want / max(sig_max, 1.0) if not clip else 0.25)
-        rig.set_exposure(float(np.clip(new, 0.01, 30000)), a.hw_average)
-    print("  could not settle the exposure -- check the light level; continuing")
+        verdict = ("CLIPPED -- lower it" if clip else
+                   "near full scale -- lower it" if fill > 0.85 else
+                   "dim -- a longer exposure gives less noise" if fill < 0.2 else "good")
+        print(f"  exposure {rig.exposure_ms:g} ms x {rig.hw_average} frames: brightest "
+              f"pixel {raw_max:.0f} counts = {100 * fill:.0f}% of full scale ({verdict})")
+        txt = input("  Enter = keep this exposure for the whole run, or type another "
+                    "(ms): ").strip()
+        if txt:
+            new = parse_ms(txt)
+            ms = new if new is not None else ask_exposure()
+            continue
+        if clip and input("  it CLIPS: clipped spectra are not linear. Keep it anyway? "
+                          "[y/N]: ").strip().lower() != "y":
+            ms = ask_exposure()
+            continue
+        return
 
 
 def quick_stokes(sw, a, cal, base, bin_nm, zero_deg=None):
@@ -591,11 +627,10 @@ def hardware_args(ap):
     ap.add_argument("--spectrometer-id", default=None, dest="spectrometer_id",
                     help="CCT device ID; null = the first one found")
     ap.add_argument("--exposure-ms", type=float_or_none, default=None, dest="exposure_ms",
-                    help="fixed exposure; null = set at the start from a bright state")
+                    help="exposure offered at the start (Enter takes it); null = you "
+                         "type one")
     ap.add_argument("--hw-average", type=int, default=10, dest="hw_average",
                     help="frames the spectrometer averages per QWP step")
-    ap.add_argument("--target-fill", type=float, default=0.6, dest="target_fill",
-                    help="automatic exposure: brightest pixel at this fraction of full scale")
     ap.add_argument("--full-scale-counts", type=float, default=65535,
                     dest="full_scale_counts", help="raw counts at saturation")
     ap.add_argument("--dark-frames", type=int, default=3, dest="dark_frames",
@@ -669,8 +704,8 @@ def main(argv=None) -> int:
         if a.simulate:
             np.savez_compressed(run / "sim_truth.npz", **r.truth())
         amb = start(r, a)
-        input("\nSet a BRIGHT state (H or R), sample OUT, then press Enter to check "
-              "the exposure...")
+        print("\nEXPOSURE: set a BRIGHT state (H or R), sample OUT, then type an "
+              "exposure -- the script shows how full the brightest pixel gets.")
         check_exposure(r, a)
         ambient_report(amb, r, a)
         print(f"  exposure for the whole run: {r.exposure_ms:g} ms x {r.hw_average} frames")

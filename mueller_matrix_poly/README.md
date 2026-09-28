@@ -40,9 +40,11 @@ zero stays one number for zero‑order and quartz/MgF₂ achromatic plates, beca
 doesn't move with wavelength. For a superachromatic plate, set `zero_source: "file"`.
 
 **Spectrometer.**
-- **One exposure for the whole run.** The Stokes fit assumes a linear detector. At the
-  start, the script checks the exposure on a bright state. With `exposure_ms: null` it
-  sets the brightest pixel to `target_fill` (60%) of full scale.
+- **One exposure for the whole run, entered by you.** The Stokes fit assumes a linear
+  detector. At the start you type an exposure. The script scans a bright state over
+  half a QWP turn and shows how full the brightest pixel gets. You keep it or type
+  another; aim for about 50–70% of full scale. Keeping a clipped exposure asks for
+  confirmation.
 - **A shutter dark before and after every sweep,** interpolated in time. A leftover
   offset looks exactly like lost polarization.
 - **Raw counts are saved,** with amplitude correction off and no SDK dark subtraction.
@@ -107,9 +109,9 @@ calibration from it too):
 | `qwp_zero_deg` | stage reading where the QWP fast axis is along the analyzer |
 | `calibration_file` | QWP retardance vs wavelength (CSV); `null` = `qwp_retardance_waves` at every wavelength |
 | `zero_source` | `constant` (`qwp_zero_deg`) or `file` (the `zero_deg` column) |
-| `exposure_ms` | `null` = set automatically at the start; a number fixes it |
+| `exposure_ms` | offered at the exposure prompt (Enter takes it); `null` = you type one |
 | `hw_average` | frames the spectrometer averages per QWP step |
-| `target_fill`, `full_scale_counts` | automatic exposure target; raw counts at saturation |
+| `full_scale_counts` | raw counts at saturation |
 | `dark_frames` | spectra averaged per shutter dark |
 | `wl_min_nm`, `wl_max_nm` | band for checks and live feedback |
 | `ref_pm_serial` | reference meter behind the beamsplitter; `null` = none |
