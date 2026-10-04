@@ -202,7 +202,31 @@ def offset_limits(a, width):
 # --------------------------------------------------------------------------- #
 
 
-class Rig:
+class _RigBase:
+    """What the real and the simulated setup do the same way."""
+
+    def frames(self, n):
+        """n spectra in a row: (n, pixels)."""
+        return np.array([self.snap() for _ in range(max(int(n), 1))])
+
+    def background_stack(self):
+        """background_frames spectra without the line light: (n, pixels). The
+        DMD blocking everything ("dmd") or the spectrometer shutter closed."""
+        n = self.a.background_frames
+        if self.a.background == "shutter":
+            self._shutter(False)
+            try:
+                return self.frames(n)
+            finally:
+                self._shutter(True)
+        self.show_all(False)
+        return self.frames(n)
+
+    def background(self):
+        return self.background_stack().mean(axis=0)
+
+
+class Rig(_RigBase):
     """DMD (dlpc900_hid) + CCT10 (thorlabs_spectrometer). Raw counts: the SDK
     dark and amplitude correction are off, the scripts take their own
     backgrounds. set_sample is a no-op: on the bench YOU move the sample."""
@@ -296,17 +320,8 @@ class Rig:
             self.wl = np.asarray(s.wavelengths, float)
         return np.asarray(s.intensities, float)
 
-    def background(self):
-        """A spectrum without the line light, averaged over background_frames."""
-        n = max(int(self.a.background_frames), 1)
-        if self.a.background == "shutter":
-            self.spec.close_shutter()
-            try:
-                return np.mean([self.snap() for _ in range(n)], axis=0)
-            finally:
-                self.spec.open_shutter()
-        self.show_all(False)
-        return np.mean([self.snap() for _ in range(n)], axis=0)
+    def _shutter(self, open_):
+        self.spec.set_shutter(open_)
 
     def now(self):
         return time.time() - self.t0
@@ -327,11 +342,12 @@ class Rig:
 _erf = np.vectorize(math.erf, otypes=[float])
 
 
-class SimRig:
+class SimRig(_RigBase):
     """Rehearsal stand-in for the whole setup, so every prompt, file and plot
     can be tried without hardware (and the calibration checked against a truth).
 
-    * source: white-LED-like (blue pump at 455 nm + broad phosphor), drifting 0.3 %;
+    * source: white-LED-like (blue pump at 455 nm + broad phosphor), drifting 0.3 %
+      and flickering 0.1 % from one spectrum to the next;
     * prism: row x on the DMD (from the centre row) carries
       lambda = 575 + 0.13 x + 3e-5 x^2 nm -- non-linear, more dispersion in the blue;
       each wavelength is a spot of 4 rows (sigma) on the DMD;
@@ -422,7 +438,8 @@ class SimRig:
 
     def snap(self):
         self.clock += self.exposure_ms * self.hw_average / 1e3 + 0.03
-        drift = 1 + 0.003 * math.sin(2 * math.pi * self.clock / 600)
+        drift = ((1 + 0.003 * math.sin(2 * math.pi * self.clock / 600))
+                 * (1 + 0.001 * self.rng.normal()))
         light = drift * self.source * (self.T + self.STRAY)
         if self.inside:
             light = light * self.sample_T
@@ -435,16 +452,8 @@ class SimRig:
         c = dark + sig + noise * self.rng.normal(0, 1, sig.size)
         return np.clip(np.round(c), 0, self.a.full_scale_counts)
 
-    def background(self):
-        n = max(int(self.a.background_frames), 1)
-        if self.a.background == "shutter":
-            self.shutter_open = False
-            try:
-                return np.mean([self.snap() for _ in range(n)], axis=0)
-            finally:
-                self.shutter_open = True
-        self.show_all(False)
-        return np.mean([self.snap() for _ in range(n)], axis=0)
+    def _shutter(self, open_):
+        self.shutter_open = bool(open_)
 
     def describe(self):
         return {"backend": "simulated", "exposure_ms": self.exposure_ms,
@@ -675,6 +684,14 @@ def ask_float(prompt, default=None, lo=None, hi=None):
         return v
 
 
+def ask_int(prompt, default=None, lo=None, hi=None):
+    while True:
+        v = ask_float(prompt, default, lo, hi)
+        if v == int(v):
+            return int(v)
+        print("  a whole number, please")
+
+
 def ask_choice(prompt, choices):
     while True:
         txt = input(prompt).strip().lower()
@@ -699,8 +716,12 @@ def fill_report(raw, a, mask=None):
             f"({verdict})"), clip
 
 
+PLOT_STYLE = {"font.size": 13, "axes.titlesize": 14, "axes.labelsize": 13,
+              "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 11}
+
+
 def get_plt(show):
-    """pyplot, or None (with a note) when matplotlib is missing."""
+    """pyplot with larger text, or None (with a note) when matplotlib is missing."""
     try:
         import matplotlib
         if not show:
@@ -709,6 +730,7 @@ def get_plt(show):
             except Exception:
                 pass
         import matplotlib.pyplot as plt
+        plt.rcParams.update(PLOT_STYLE)
         return plt
     except ImportError:
         print("  (matplotlib is not installed -- no figure)")

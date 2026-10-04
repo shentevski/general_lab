@@ -2,6 +2,8 @@
   "calibration_file": null,
   "line_width_rows": 20,
   "exposure_ms": null,
+  "frames": 10,
+  "error": "std",
 
   "scan_start_nm": null,
   "scan_stop_nm": null,

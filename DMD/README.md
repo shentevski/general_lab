@@ -71,24 +71,34 @@ wavelength at that row.
 `python dmd_measure.py` opens a menu that stays connected between measurements (`q` quits;
 Ctrl‑C during a measurement returns to the menu).
 
-**1 = single measurement.** Choose 1, 2 or 3 wavelengths, then the exposure. Then **sample
-IN** → Enter → spectrum, and **sample OUT** → Enter → spectrum. If anything clipped, it
+After the exposure, every measurement also asks for the **number of frames**. Each frame is
+a separate spectrum (`hw_average` × exposure). Results are the mean over the frames, and the
+spread of the frames gives the error bars (see [Error bars](#error-bars)). Enter keeps the
+last exposure and number of frames.
+
+**1 = single measurement.** Choose 1, 2 or 3 wavelengths, the exposure and the frames. Then
+**sample IN** → Enter → frames, and **sample OUT** → Enter → frames. If anything clipped, it
 offers to measure again with a shorter exposure. Lines that would overlap on the DMD are
 refused. Files go in `<data_dir>/single/` as `<date>_<time>_<n>wl_*`:
-`sample_in.csv`, `sample_out.csv` (`wavelength_nm`, `net_counts`, `raw_counts`,
-`background_counts`) and `meta.json`.
+- `sample_in.csv`, `sample_out.csv`: `wavelength_nm`, `net_counts` (mean of the frames −
+  background), `net_std` (standard deviation of the frames, per pixel), `raw_counts`,
+  `background_counts`;
+- `frames.npz`: every frame and every background frame, raw (what the analysis reads);
+- `meta.json`.
 
-**2 = scan.** Choose start, stop and step (nm) and the exposure. The whole scan runs with the
-sample IN, then the whole scan with it OUT, so the sample is moved only once.
+**2 = scan.** Choose start, stop and step (nm), the exposure and the frames. The whole scan
+runs with the sample IN, then the whole scan with it OUT, so the sample is moved only once.
 - **1 = one peak:** one line steps across the range.
 - **2 = scanning + stationary peak:** a second line stays at the wavelength you choose,
   displayed together with the scanning one at every step. Steps where the two lines would
   overlap on the DMD are skipped. Steps where their peaks' integration windows overlap are
   NaN in the analysis.
 
-Files go in `<data_dir>/scan/<date>_<time>_1peak/` (or `_2peak/`):
-`sample_in.csv` and `sample_out.csv` (one column per step), `steps.csv`, `background.csv`
-and `meta.json`, all prefixed with the date and time.
+Files go in `<data_dir>/scan/<date>_<time>_1peak/` (or `_2peak/`), all prefixed with the
+date and time:
+- `sample_in.csv`, `sample_out.csv`: mean of the frames − background, one column per step;
+- `sample_in_std.csv`, `sample_out_std.csv`: the per‑pixel standard deviation of the frames;
+- `steps.csv`, `background.csv`, `frames.npz` (every frame, raw) and `meta.json`.
 
 The scan prints how far the measured peak centres are from the calibration, as a running
 check of it. In scan 2, it also prints how steady the stationary peak's in/out ratio is over
@@ -109,13 +119,42 @@ Enter = none):
 "in" and "out" are the background‑subtracted sample‑in and sample‑out spectra. The ratios are
 left out (NaN) where the sample‑out signal is below `min_signal_counts`.
 
-- **Single:** on the whole spectrum (`<…>_subtract.csv`, …), and on the counts integrated
-  over each peak (`<…>_peaks.csv`, printed as a table), plus `<…>_analysis.png`.
+- **Single:** on the counts integrated over each peak, which are the results
+  (`<…>_peaks.csv`, printed as `value +- error`). The same formulas are also applied pixel by
+  pixel across the spectrum, for looking at only (`<…>_subtract.csv`, …). Plus
+  `<…>_analysis.png`.
 - **Scan:** on the counts integrated over the peak at every step (`<…>_results.csv`), against
   the wavelength, plus `<…>_analysis.png`.
 
 A peak is integrated over its centre ± `band_halfwidth_nm` (null: ± its FWHM). The centre is
 found in the sample‑OUT spectrum within `search_nm` of the calibrated wavelength.
+
+### Error bars
+
+1. Every frame has the background subtracted, and the peak is integrated frame by frame.
+2. The mean of the N integrals is I. Their spread gives the error e:
+   - `error: "std"` (default): e = standard deviation of the N frames;
+   - `error: "sem"`: e = standard error of the mean, √(std²/N + e_bg²), where e_bg is the
+     error of the averaged background.
+3. The error is propagated, with sample in and sample out independent:
+
+| | value | error |
+|---|---|---|
+| subtract | I_in − I_out | √(e_in² + e_out²) |
+| divide | T = I_in / I_out | T · √((e_in/I_in)² + (e_out/I_out)²) |
+| absorbance | A = −log10 T | √((e_in/I_in)² + (e_out/I_out)²) / ln 10 |
+
+The CSV columns carry the type in their name, e.g. `absorbance_std` or `absorbance_sem`.
+`--analyze` with the other `error` setting recomputes them from the saved frames. In the
+figures, the values are labelled `value ± error` and the title states which error it is. The
+scan legends give the median error bar, because the bars are often smaller than the markers.
+
+**What the error bars don't include:** source drift and sample repositioning between the IN and
+OUT measurements. The frames are taken back to back, so they can't see either. In simulation
+the frame errors match the real scatter of repeated measurements once drift is switched off;
+with the simulator's 0.3 % drift the scatter was about 20 % larger. To include drift, repeat
+the whole in/out measurement a few times, or run the empty test (air for both), and use the
+spread of the results.
 
 To analyse saved data again, with another analysis or other settings, and no hardware:
 
@@ -158,6 +197,8 @@ is refused).
 | `calibration_file` | `null` = the newest in `<data_dir>/calibrations/`; or a CSV (or its folder) |
 | `line_width_rows` | line width for measurements (narrower = narrower band, less light) |
 | `exposure_ms` | offered at the first exposure prompt; after that, the last one you used |
+| `frames` | offered at the first frames prompt; after that, the last one you used |
+| `error` | `std`: error bars = standard deviation of the frames; `sem`: standard error of the mean (+ background) |
 | `scan_start_nm`, `scan_stop_nm`, `scan_step_nm` | offered at the scan prompts (`null` = the calibrated range) |
 | `band_halfwidth_nm` | peaks are integrated over centre ± this; `null` = ± the FWHM |
 | `search_nm` | how far from the calibrated wavelength a peak is looked for |
