@@ -75,17 +75,18 @@ LABELS = {"subtract": "in - out (counts)", "divide": "in / out",
 # --------------------------------------------------------------------------- #
 
 
-def mean_err(x, bg_err, a):
+def mean_err(x, bg_err, a, mode=None):
     """Mean over the frames (axis 0) and its error bar: the frames' standard
     deviation (error "std"), or the standard error of the mean with the
-    background's own error added (error "sem"). NaN with a single frame."""
+    background's own error added (error "sem"). mode overrides a.error.
+    NaN with a single frame."""
     x = np.asarray(x, float)
     n = x.shape[0]
     mean = x.mean(axis=0)
     if n < 2:
         return mean, np.full(np.shape(mean), np.nan)
     std = x.std(axis=0, ddof=1)
-    if a.error == "std":
+    if (mode or a.error) == "std":
         return mean, std
     return mean, np.sqrt(std ** 2 / n + np.asarray(bg_err) ** 2)
 
@@ -262,62 +263,113 @@ def analyse_single(meta_path: Path, a, kinds):
                     kinds, n)
 
 
+def scan_patterns(off, stat_off):
+    """What the DMD shows at one scan step, in this order. With a stationary
+    peak: the scanning line alone, both lines, the stationary line alone --
+    so 'both' can be compared with the sum of the two alone."""
+    if stat_off is None:
+        return {"scan": [off]}
+    return {"scan": [off], "both": [off, stat_off], "stat": [stat_off]}
+
+
 def analyse_scan(meta_path: Path, a, kinds):
     meta_path, meta = load_meta(meta_path)
+    if "patterns" not in meta:
+        raise SystemExit(f"{meta_path}: measured with an older version of this script")
     folder, pre, suf = meta_path.parent, prefix_of(meta_path), a.error
     d = load_frames(folder, meta)
     wl = d["wavelength_nm"]
     steps = read_csv(folder / meta["files"]["steps"])
     cal_nm, nominal = steps["cal_nm"], steps["line_band_nm"]
-    stat = meta.get("stationary")
-    K, n = d["in_frames"].shape[:2]
+    stat, names = meta.get("stationary"), meta["patterns"]
+    K, n = d[f"in_{names[0]}_frames"].shape[:2]
 
-    side = {}
+    net, bgs = {}, {}
     for s in ("in", "out"):
         b0, b1 = d[f"{s}_bg_before"], d[f"{s}_bg_after"]
-        t, (tb0, tb1) = d[f"t_{s}"], d[f"t_bg_{s}"]
-        f = np.clip((t - tb0) / (tb1 - tb0), 0, 1) if tb1 > tb0 else np.full(K, 0.5)
-        bg = interp_background(t, tb0, tb1, b0.mean(axis=0), b1.mean(axis=0))
-        side[s] = {"net": d[f"{s}_frames"] - bg[:, None, :], "b0": b0, "b1": b1, "f": f}
-    out_mean = side["out"]["net"].mean(axis=1)                         # (K, P)
+        tb0, tb1 = d[f"t_bg_{s}"]
+        for p in names:
+            t = d[f"t_{s}_{p}"]
+            f = np.clip((t - tb0) / (tb1 - tb0), 0, 1) if tb1 > tb0 else np.full(K, 0.5)
+            bg = interp_background(t, tb0, tb1, b0.mean(axis=0), b1.mean(axis=0))
+            net[s, p] = d[f"{s}_{p}_frames"] - bg[:, None, :]          # (K, n, P)
+            bgs[s, p] = (f, b0, b1)
 
-    def integral(s, k, w):
-        m = (wl >= w[0]) & (wl <= w[1])
-        sd, fk = side[s], side[s]["f"][k]
-        e_bg = np.hypot((1 - fk) * bg_mean_err(sd["b0"][:, m].sum(axis=1)),
-                        fk * bg_mean_err(sd["b1"][:, m].sum(axis=1)))
-        return mean_err(sd["net"][k][:, m].sum(axis=1), e_bg, a)
+    def integral(s, p, k, m):
+        """Counts of pattern p summed over the pixels m at step k:
+        (mean, error bar, standard error of the mean)."""
+        f, b0, b1 = bgs[s, p]
+        e_bg = np.hypot((1 - f[k]) * bg_mean_err(b0[:, m].sum(axis=1)),
+                        f[k] * bg_mean_err(b1[:, m].sum(axis=1)))
+        x = net[s, p][k][:, m].sum(axis=1)
+        return (*mean_err(x, e_bg, a), mean_err(x, e_bg, a, "sem")[1])
 
+    def window_mask(w):
+        return (wl >= w[0]) & (wl <= w[1])
+
+    # each peak from the spectra where it is ALONE on the DMD
     res = {"step": np.arange(K), "cal_nm": cal_nm}
-    scan_win = [band_window(wl, out_mean[k], cal_nm[k], nominal[k], a,
-                            search_radius(a, cal_nm[k], [stat["cal_nm"]] if stat else []))
+    out_scan = net["out", "scan"].mean(axis=1)
+    scan_win = [band_window(wl, out_scan[k], cal_nm[k], nominal[k], a, a.search_nm)
                 for k in range(K)]
     res["centre_nm"] = np.array([w[2] for w in scan_win])
     res["fwhm_nm"] = np.array([w[3] for w in scan_win])
     for s in ("in", "out"):
-        v = np.array([integral(s, k, scan_win[k]) for k in range(K)])
+        v = np.array([integral(s, "scan", k, window_mask(scan_win[k])) for k in range(K)])
         res[f"{s}_counts"], res[f"{s}_counts_{suf}"] = v[:, 0], v[:, 1]
-    overlap = np.zeros(K, bool)
     if stat:
-        stat_win = [band_window(wl, out_mean[k], stat["cal_nm"], stat["line_band_nm"], a,
-                                search_radius(a, stat["cal_nm"], [cal_nm[k]]))
-                    for k in range(K)]
-        overlap = np.array([w[0] < v[1] and v[0] < w[1]
-                            for w, v in zip(scan_win, stat_win)])
+        out_stat = net["out", "stat"].mean(axis=1)
+        stat_win = [band_window(wl, out_stat[k], stat["cal_nm"], stat["line_band_nm"], a,
+                                a.search_nm) for k in range(K)]
         res["stat_centre_nm"] = np.array([w[2] for w in stat_win])
         for s in ("in", "out"):
-            v = np.array([integral(s, k, stat_win[k]) for k in range(K)])
+            v = np.array([integral(s, "stat", k, window_mask(stat_win[k])) for k in range(K)])
             res[f"stat_{s}_counts"], res[f"stat_{s}_counts_{suf}"] = v[:, 0], v[:, 1]
     for kind in kinds:
         for p in ("", "stat_") if stat else ("",):
-            v, e = analyse(kind, res[f"{p}in_counts"], res[f"{p}out_counts"],
-                           a.min_signal_counts, res[f"{p}in_counts_{suf}"],
-                           res[f"{p}out_counts_{suf}"])
-            res[f"{p}{kind}"] = np.where(overlap, np.nan, v)
-            res[f"{p}{kind}_{suf}"] = np.where(overlap, np.nan, e)
-    if stat:
-        res["overlap"] = overlap.astype(int)
+            res[f"{p}{kind}"], res[f"{p}{kind}_{suf}"] = analyse(
+                kind, res[f"{p}in_counts"], res[f"{p}out_counts"], a.min_signal_counts,
+                res[f"{p}in_counts_{suf}"], res[f"{p}out_counts_{suf}"])
 
+    # both together vs the sum of the two alone
+    delta = None
+    if stat:
+        lo_v, hi_v = meta["view_nm"]
+        view = (wl >= lo_v) & (wl <= hi_v)
+        peaks_m = [window_mask(scan_win[k]) | window_mask(stat_win[k]) for k in range(K)]
+        R = {}
+        for s in ("in", "out"):
+            rows = []
+            for k in range(K):
+                B, A, S = (integral(s, p, k, peaks_m[k]) for p in ("both", "scan", "stat"))
+                Q = A[0] + S[0]
+                with np.errstate(all="ignore"):
+                    r = B[0] / Q
+                    e = r * np.hypot(B[1] / B[0], np.hypot(A[1], S[1]) / Q)
+                    e_sem = r * np.hypot(B[2] / B[0], np.hypot(A[2], S[2]) / Q)
+                Bo, Ao, So = (integral(s, p, k, view & ~peaks_m[k])
+                              for p in ("both", "scan", "stat"))
+                rows.append((r, e, e_sem, Bo[0] - Ao[0] - So[0],
+                             np.sqrt(Bo[1] ** 2 + Ao[1] ** 2 + So[1] ** 2)))
+            v = np.array(rows)
+            R[s] = v
+            res[f"excess_{s}_pct"] = 100 * (v[:, 0] - 1)
+            res[f"excess_{s}_pct_{suf}"] = 100 * v[:, 1]
+            res[f"excess_{s}_z"] = (v[:, 0] - 1) / v[:, 2]
+            res[f"other_{s}_counts"], res[f"other_{s}_counts_{suf}"] = v[:, 3], v[:, 4]
+        with np.errstate(all="ignore"):
+            res["extra_absorbance"] = -np.log10(R["in"][:, 0] / R["out"][:, 0])
+            res[f"extra_absorbance_{suf}"] = np.hypot(R["in"][:, 1] / R["in"][:, 0],
+                                                      R["out"][:, 1] / R["out"][:, 0]) / np.log(10)
+            sem = np.hypot(R["in"][:, 2] / R["in"][:, 0],
+                           R["out"][:, 2] / R["out"][:, 0]) / np.log(10)
+            res["extra_absorbance_z"] = res["extra_absorbance"] / sem
+        res["windows_overlap"] = np.array([w[0] < v[1] and v[0] < w[1]
+                                           for w, v in zip(scan_win, stat_win)]).astype(int)
+        delta = {s: net[s, "both"].mean(axis=1) - net[s, "scan"].mean(axis=1)
+                 - net[s, "stat"].mean(axis=1) for s in ("in", "out")}       # (K, P)
+
+    # ---- report ----------------------------------------------------------- #
     shift = res["centre_nm"] - cal_nm
     good = np.isfinite(res["fwhm_nm"])
     print(f"\n  {K} steps, {cal_nm.min():.1f}-{cal_nm.max():.1f} nm; errors: "
@@ -327,31 +379,69 @@ def analyse_scan(meta_path: Path, a, kinds):
               f"worst {shift[good][np.argmax(np.abs(shift[good]))]:+.2f} nm")
     if stat:
         r = analyse("divide", res["stat_in_counts"], res["stat_out_counts"],
-                    a.min_signal_counts)[0][~overlap]
+                    a.min_signal_counts)[0]
         if np.isfinite(r).any():
-            print(f"  stationary peak ({stat['cal_nm']:.1f} nm): in/out {np.nanmean(r):.4g}, "
-                  f"spread {100 * np.nanstd(r) / np.nanmean(r):.2f}% over the scan")
-        if overlap.any():
-            print(f"  {overlap.sum()} steps where the two peaks' windows overlap: left out "
-                  f"of the analysis (NaN)")
+            print(f"  stationary peak alone ({stat['cal_nm']:.1f} nm): in/out "
+                  f"{np.nanmean(r):.4g}, spread {100 * np.nanstd(r) / np.nanmean(r):.2f}% "
+                  f"over the scan")
     for kind in kinds:
         v, e = res[kind], res[f"{kind}_{suf}"]
         if np.isfinite(v).any():
             print(f"  {kind:10s}: {np.nanmin(v):.4g} to {np.nanmax(v):.4g}"
                   + (f", typical error +- {np.nanmedian(e):.2g}" if np.isfinite(e).any()
                      else ""))
+    if stat:
+        report_interaction(res, cal_nm, n)
 
     write_csv(folder / f"{pre}_results.csv", res)
-    print(f"  saved: {pre}_results.csv")
+    saved = [f"{pre}_results.csv"]
+    if delta is not None:
+        cols_names = [f"step{k:03d}_{c:.2f}nm" for k, c in enumerate(cal_nm)]
+        for s in ("in", "out"):
+            cols = {"wavelength_nm": wl}
+            cols.update(zip(cols_names, delta[s]))
+            write_csv(folder / f"{pre}_interaction_{s}.csv", cols)
+            saved.append(f"{pre}_interaction_{s}.csv")
+    print(f"  saved: {', '.join(saved)}")
     if kinds:
         plot_scan(a, folder / f"{pre}_analysis.png", meta, res, kinds, stat, n)
+    if stat:
+        plot_interaction(a, folder / f"{pre}_interaction.png", meta, res, wl, delta, stat, n)
+
+
+def report_interaction(res, cal_nm, n):
+    """Is 'both together' different from the sum of the two alone?"""
+    print("\n  both wavelengths together vs the sum of each alone (light in the two peaks):")
+    if n < 2:
+        print("    1 frame: no errors, no significance")
+    for s, name in (("out", "sample OUT (control)"), ("in", "sample IN")):
+        v, z = res[f"excess_{s}_pct"], res[f"excess_{s}_z"]
+        ok = np.isfinite(z)
+        chi = f", chi2 per step {np.mean(z[ok] ** 2):.2f}" if ok.any() else ""
+        print(f"    {name:21s}: excess light median {np.nanmedian(v):+.3f} %, "
+              f"range {np.nanmin(v):+.3f} to {np.nanmax(v):+.3f} %{chi}")
+    A, z = res["extra_absorbance"], res["extra_absorbance_z"]
+    ok = np.isfinite(z)
+    if not ok.any():
+        return
+    big = ok & (np.abs(z) > 3)
+    print(f"    extra absorbance (IN corrected by the control): {np.nanmin(A):+.2e} to "
+          f"{np.nanmax(A):+.2e}; chi2 per step {np.mean(z[ok] ** 2):.2f} (1 = noise only)")
+    if big.any():
+        print(f"    -> beyond 3 standard errors at {', '.join(f'{x:.1f}' for x in cal_nm[big])} "
+              f"nm (largest {np.max(np.abs(z[ok])):.1f})")
+    else:
+        print(f"    -> no effect beyond the noise: all steps within 3 standard errors "
+              f"(largest {np.max(np.abs(z[ok])):.1f})")
+    print("       standard errors of the frames; drift between the three patterns of a "
+          "step adds to them -- a control chi2 well above 1 means it matters")
 
 
 # --------------------------------------------------------------------------- #
 # figures
 # --------------------------------------------------------------------------- #
 
-LABEL_BOX = dict(boxstyle="round,pad=0.3", fc="white", ec="0.6", alpha=0.9)
+LABEL_BOX = dict(boxstyle="round,pad=0.3", fc="none", ec="0.6")     # see-through
 
 
 def legend_with_error(ax, e):
@@ -413,37 +503,87 @@ def plot_scan(a, path, meta, res, kinds, stat, n):
         return
     suf = a.error
     x = res["cal_nm"]
-    hide = res.get("overlap", np.zeros(len(x))).astype(bool)   # the two peaks merged
-    show = lambda key: np.where(hide, np.nan, res[key])          # noqa: E731
     fig, ax = plt.subplots(1 + len(kinds), 1, figsize=(11, 4 * (1 + len(kinds))),
                            sharex=True, squeeze=False)
     ax = ax[:, 0]
     bars = dict(ms=4, capsize=3, elinewidth=1)
-    ax[0].errorbar(x, show("out_counts"), yerr=show(f"out_counts_{suf}"), fmt="o-",
-                   label="scanning peak, sample out", **bars)
-    ax[0].errorbar(x, show("in_counts"), yerr=show(f"in_counts_{suf}"), fmt="o-",
-                   label="scanning peak, sample in", **bars)
+    alone = " (alone)" if stat else ""
+    ax[0].errorbar(x, res["out_counts"], yerr=res[f"out_counts_{suf}"], fmt="o-",
+                   label=f"scanning peak{alone}, sample out", **bars)
+    ax[0].errorbar(x, res["in_counts"], yerr=res[f"in_counts_{suf}"], fmt="o-",
+                   label=f"scanning peak{alone}, sample in", **bars)
     if stat:
-        ax[0].errorbar(x, show("stat_out_counts"), yerr=show(f"stat_out_counts_{suf}"),
-                       fmt="s--", label="stationary peak, sample out", **bars)
-        ax[0].errorbar(x, show("stat_in_counts"), yerr=show(f"stat_in_counts_{suf}"),
-                       fmt="s--", label="stationary peak, sample in", **bars)
+        ax[0].errorbar(x, res["stat_out_counts"], yerr=res[f"stat_out_counts_{suf}"],
+                       fmt="s--", label="stationary peak (alone), sample out", **bars)
+        ax[0].errorbar(x, res["stat_in_counts"], yerr=res[f"stat_in_counts_{suf}"],
+                       fmt="s--", label="stationary peak (alone), sample in", **bars)
         for xx in ax:
             xx.axvline(stat["cal_nm"], color="0.6", ls=":", lw=1)
     ax[0].set(ylabel="integrated counts",
               title=f"{meta['stamp']}: scan, {meta['exposure_ms']:g} ms x {n} frames"
                     + (f", stationary peak {stat['cal_nm']:.1f} nm" if stat else "")
                     + f"\n{error_note(a, n)}")
-    legend_with_error(ax[0], show(f"out_counts_{suf}"))
+    legend_with_error(ax[0], res[f"out_counts_{suf}"])
     for xx, k in zip(ax[1:], kinds):
-        xx.errorbar(x, res[k], yerr=res[f"{k}_{suf}"], fmt="o-", label="scanning peak",
-                    **bars)
+        xx.errorbar(x, res[k], yerr=res[f"{k}_{suf}"], fmt="o-",
+                    label=f"scanning peak{alone}", **bars)
         if stat:
             xx.errorbar(x, res[f"stat_{k}"], yerr=res[f"stat_{k}_{suf}"], fmt="s--",
-                        label=f"stationary peak ({stat['cal_nm']:.1f} nm)", **bars)
+                        label=f"stationary peak alone ({stat['cal_nm']:.1f} nm)", **bars)
         legend_with_error(xx, res[f"{k}_{suf}"])
         xx.set(ylabel=LABELS[k])
     ax[-1].set(xlabel="scanning peak wavelength (nm)")
+    fig.tight_layout()
+    finish_figure(plt, fig, path, a.show_plots)
+
+
+def cell_edges(c):
+    """Cell boundaries around increasing or decreasing centres, for pcolormesh."""
+    c = np.asarray(c, float)
+    if c.size == 1:
+        return np.array([c[0] - 0.5, c[0] + 0.5])
+    mid = 0.5 * (c[1:] + c[:-1])
+    return np.concatenate([[2 * c[0] - mid[0]], mid, [2 * c[-1] - mid[-1]]])
+
+
+def plot_interaction(a, path, meta, res, wl, delta, stat, n):
+    """Both wavelengths together vs the sum of each alone."""
+    plt = get_plt(a.show_plots)
+    if plt is None:
+        return
+    suf = a.error
+    x = res["cal_nm"]
+    fig, ax = plt.subplots(3, 1, figsize=(11, 13), sharex=True,
+                           gridspec_kw={"height_ratios": [1, 1, 1.3]})
+    bars = dict(ms=4, capsize=3, elinewidth=1)
+    for s, label in (("out", "sample out (control)"), ("in", "sample in")):
+        ax[0].errorbar(x, res[f"excess_{s}_pct"], yerr=res[f"excess_{s}_pct_{suf}"],
+                       fmt="o-", label=label, **bars)
+    ax[0].axhline(0, color="k", lw=0.8)
+    ax[0].set(ylabel="excess light (%)",
+              title=f"{meta['stamp']}: both together vs each alone, stationary peak "
+                    f"{stat['cal_nm']:.1f} nm\n{error_note(a, n)}")
+    legend_with_error(ax[0], res[f"excess_in_pct_{suf}"])
+    ax[1].errorbar(x, res["extra_absorbance"], yerr=res[f"extra_absorbance_{suf}"],
+                   fmt="o-", color="C3", label="sample in, corrected by the control", **bars)
+    ax[1].axhline(0, color="k", lw=0.8)
+    ax[1].set(ylabel="extra absorbance\nwhen both are on")
+    legend_with_error(ax[1], res[f"extra_absorbance_{suf}"])
+
+    lo, hi = meta["view_nm"]
+    m = (wl >= lo) & (wl <= hi)
+    d = delta["in"][:, m]
+    lim = np.nanpercentile(np.abs(d), 99.5) or 1.0
+    im = ax[2].pcolormesh(cell_edges(x), cell_edges(wl[m]), d.T, cmap="RdBu_r",
+                          vmin=-lim, vmax=lim, shading="flat")
+    ax[2].plot(x, x, color="0.4", lw=0.8, ls="--")
+    ax[2].axhline(stat["cal_nm"], color="0.4", lw=0.8, ls="--")
+    fig.colorbar(im, ax=ax[2], label="both - scan - stat (counts)", pad=0.01)
+    ax[2].set(ylabel="spectrometer wavelength (nm)",
+              xlabel="scanning peak wavelength (nm)",
+              title="per pixel, sample in (0 = no effect)")
+    for xx in ax:
+        xx.axvline(stat["cal_nm"], color="0.6", ls=":", lw=1)
     fig.tight_layout()
     finish_figure(plt, fig, path, a.show_plots)
 
@@ -478,12 +618,17 @@ def ask_exposure_frames(r, a, state):
 
 
 def measure_lines(r, a, offsets, n):
-    """n frames with the lines, then the background frames right after."""
-    r.show_lines(offsets, a.line_width_rows)
+    """n frames with the lines, then the background frames right after. The
+    lines are already on the DMD (shown when the wavelengths were chosen) and
+    go straight back on after a DMD background, so they stay on while you
+    move the sample."""
+    r.show_lines(offsets, a.line_width_rows)        # no-op: they are on already
     t = r.now()
     frames = r.frames(n)
     t_bg = r.now()
-    return {"frames": frames, "bg": r.background_stack(), "t": t, "t_bg": t_bg}
+    bg = r.background_stack()
+    r.show_lines(offsets, a.line_width_rows)        # back on (no-op after a shutter dark)
+    return {"frames": frames, "bg": bg, "t": t, "t_bg": t_bg}
 
 
 def common_meta(r, a, cal, kind, st, n):
@@ -512,6 +657,8 @@ def single(r, a, cal, state, root):
     for w, o, b in zip(targets, offsets, band):
         print(f"  {w:g} nm -> line at offset {o:+d} rows ({cal.wl_at(o):.2f} nm, "
               f"band ~{b:.1f} nm)")
+    r.show_lines(offsets, a.line_width_rows)
+    print("  the lines are on the DMD and stay on while you move the sample")
 
     st = stamp()
     while True:
@@ -569,28 +716,37 @@ def scan_targets(start, stop, step):
 
 
 def run_scan(r, a, cal, offsets, stat_off, side, n):
+    """One pass: a background, at every step each pattern of scan_patterns (n
+    frames each), a background."""
+    names = list(scan_patterns(0, stat_off))
     t0 = r.now()
     b0 = r.background_stack()
-    frames, t = [], np.empty(len(offsets))
+    frames = {p: [] for p in names}
+    t = {p: np.empty(len(offsets)) for p in names}
     for k, off in enumerate(offsets):
-        r.show_lines([off] if stat_off is None else [off, stat_off], a.line_width_rows)
-        t[k] = r.now()
-        frames.append(r.frames(n))
+        for p, lines in scan_patterns(off, stat_off).items():
+            r.show_lines(lines, a.line_width_rows)
+            t[p][k] = r.now()
+            frames[p].append(r.frames(n))
         done = int(30 * (k + 1) / len(offsets))
         print(f"\r  sample {side.upper():3s} [{'#' * done}{'.' * (30 - done)}] "
               f"{k + 1}/{len(offsets)}  {cal.wl_at(off):6.1f} nm", end="", flush=True)
     print()
     t1 = r.now()
     b1 = r.background_stack()
-    frames = np.array(frames)                                       # (steps, n, pixels)
-    net = frames - interp_background(t, t0, t1, b0.mean(axis=0), b1.mean(axis=0))[:, None]
     view = view_mask(r, cal)
-    return {"frames": frames, "net_mean": net.mean(axis=1),
-            "net_std": net.std(axis=1, ddof=1) if n > 1 else np.full(net.shape[::2], np.nan),
-            "t": t, "b0": b0, "b1": b1, "t_bg": np.array([t0, t1]),
-            "clipped": np.array([clipped(f[:, view], a.full_scale_counts).any()
-                                 for f in frames]),
-            "raw_max": frames[..., view].max()}
+    out = {"b0": b0, "b1": b1, "t_bg": np.array([t0, t1]), "p": {},
+           "clipped": np.zeros(len(offsets), bool), "raw_max": 0.0}
+    for p in names:
+        fr = np.array(frames[p])                                    # (steps, n, pixels)
+        net = fr - interp_background(t[p], t0, t1, b0.mean(axis=0), b1.mean(axis=0))[:, None]
+        out["p"][p] = {"frames": fr, "t": t[p], "net_mean": net.mean(axis=1),
+                       "net_std": (net.std(axis=1, ddof=1) if n > 1
+                                   else np.full(net.shape[::2], np.nan))}
+        out["clipped"] |= np.array([clipped(f[:, view], a.full_scale_counts).any()
+                                    for f in fr])
+        out["raw_max"] = max(out["raw_max"], float(fr[..., view].max()))
+    return out
 
 
 def scan(r, a, cal, state, root):
@@ -615,14 +771,18 @@ def scan(r, a, cal, state, root):
                   f"would overlap the stationary one on the DMD")
         offsets = keep
         print(f"  stationary: {ws:g} nm -> offset {so:+d} rows ({stat['cal_nm']:.2f} nm)")
+        print("  at every step: scanning line alone, both lines, stationary line alone")
     if not offsets:
         print("  nothing to scan")
         return
+    stat_off = stat and stat["offset_rows"]
+    names = list(scan_patterns(0, stat_off))
     cal_nm = [cal.wl_at(o) for o in offsets]
     print(f"  {len(offsets)} steps, {cal_nm[0]:.1f} to {cal_nm[-1]:.1f} nm")
 
     n = ask_exposure_frames(r, a, state)
-    est = len(offsets) * (a.dmd_settle_s + 0.3 + n * r.exposure_ms * r.hw_average / 1e3)
+    est = len(offsets) * len(names) * (a.dmd_settle_s + 0.3
+                                       + n * r.exposure_ms * r.hw_average / 1e3)
     print(f"  about {est / 60:.1f} min per pass")
 
     st = stamp()
@@ -630,43 +790,50 @@ def scan(r, a, cal, state, root):
     for side, prompt in SIDES:
         input(prompt)
         r.set_sample(side == "in")
-        data[side] = run_scan(r, a, cal, offsets, stat and stat["offset_rows"], side, n)
-        fill = data[side]["raw_max"] / a.full_scale_counts
+        data[side] = run_scan(r, a, cal, offsets, stat_off, side, n)
         nclip = int(data[side]["clipped"].sum())
-        print(f"  brightest pixel {100 * fill:.0f}% of full scale"
+        print(f"  brightest pixel {100 * data[side]['raw_max'] / a.full_scale_counts:.0f}% "
+              f"of full scale"
               + (f" -- WARNING: {nclip} steps CLIPPED (lower the exposure)" if nclip else ""))
 
     folder = new_folder(root / "scan", f"{st}_{'1peak' if kind == '1' else '2peak'}")
-    names = [f"step{k:03d}_{c:.2f}nm" for k, c in enumerate(cal_nm)]
-    files = {"in": f"{st}_sample_in.csv", "out": f"{st}_sample_out.csv",
-             "in_std": f"{st}_sample_in_std.csv", "out_std": f"{st}_sample_out_std.csv",
-             "steps": f"{st}_steps.csv", "background": f"{st}_background.csv",
+    step_names = [f"step{k:03d}_{c:.2f}nm" for k, c in enumerate(cal_nm)]
+    files = {"steps": f"{st}_steps.csv", "background": f"{st}_background.csv",
              "frames": f"{st}_frames.npz"}
     for side in ("in", "out"):
-        for key, what in ((side, "net_mean"), (f"{side}_std", "net_std")):
-            cols = {"wavelength_nm": r.wl}
-            cols.update(zip(names, data[side][what]))
-            write_csv(folder / files[key], cols)
-    write_csv(folder / files["steps"], {
-        "step": np.arange(len(offsets)), "offset_rows": offsets, "cal_nm": cal_nm,
-        "line_band_nm": [a.line_width_rows * cal.nm_per_row(c) for c in cal_nm],
-        "t_in_s": data["in"]["t"], "t_out_s": data["out"]["t"],
-        "clipped_in": data["in"]["clipped"].astype(int),
-        "clipped_out": data["out"]["clipped"].astype(int)})
+        for p in names:
+            sfx = "" if len(names) == 1 else f"_{p}"
+            for key, what, end in ((f"{side}{sfx}", "net_mean", ""),
+                                   (f"{side}{sfx}_std", "net_std", "_std")):
+                files[key] = f"{st}_sample_{side}{sfx}{end}.csv"
+                cols = {"wavelength_nm": r.wl}
+                cols.update(zip(step_names, data[side]["p"][p][what]))
+                write_csv(folder / files[key], cols)
+    steps_cols = {"step": np.arange(len(offsets)), "offset_rows": offsets, "cal_nm": cal_nm,
+                  "line_band_nm": [a.line_width_rows * cal.nm_per_row(c) for c in cal_nm]}
+    for side in ("in", "out"):
+        for p in names:
+            steps_cols[f"t_{side}_{p}_s"] = data[side]["p"][p]["t"]
+        steps_cols[f"clipped_{side}"] = data[side]["clipped"].astype(int)
+    write_csv(folder / files["steps"], steps_cols)
     write_csv(folder / files["background"], {
         "wavelength_nm": r.wl, "in_before": data["in"]["b0"].mean(axis=0),
         "in_after": data["in"]["b1"].mean(axis=0),
         "out_before": data["out"]["b0"].mean(axis=0),
         "out_after": data["out"]["b1"].mean(axis=0)})
-    np.savez_compressed(folder / files["frames"], wavelength_nm=r.wl,
-                        **{k: v for s in ("in", "out") for k, v in (
-                            (f"{s}_frames", data[s]["frames"].astype(np.float32)),
-                            (f"{s}_bg_before", data[s]["b0"].astype(np.float32)),
-                            (f"{s}_bg_after", data[s]["b1"].astype(np.float32)),
-                            (f"t_{s}", data[s]["t"]), (f"t_bg_{s}", data[s]["t_bg"]))})
+    arrays = {"wavelength_nm": r.wl}
+    for s in ("in", "out"):
+        arrays.update({f"{s}_bg_before": data[s]["b0"].astype(np.float32),
+                       f"{s}_bg_after": data[s]["b1"].astype(np.float32),
+                       f"t_bg_{s}": data[s]["t_bg"]})
+        for p in names:
+            arrays[f"{s}_{p}_frames"] = data[s]["p"][p]["frames"].astype(np.float32)
+            arrays[f"t_{s}_{p}"] = data[s]["p"][p]["t"]
+    np.savez_compressed(folder / files["frames"], **arrays)
     meta = common_meta(r, a, cal, "dmd_scan", st, n)
     meta.update(scan_type="one peak" if kind == "1" else "scanning + stationary peak",
-                start_nm=start, stop_nm=stop, step_nm=step, stationary=stat, files=files)
+                start_nm=start, stop_nm=stop, step_nm=step, stationary=stat,
+                patterns=names, files=files)
     meta_path = folder / f"{st}_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2, default=str))
     print(f"saved: {folder}")

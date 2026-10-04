@@ -239,6 +239,7 @@ class Rig(_RigBase):
         self.wl = None
         self.t0 = time.time()
         self._encoded = {}
+        self._current = None                   # the pattern on the DMD now
 
     def __enter__(self):
         try:
@@ -290,6 +291,8 @@ class Rig(_RigBase):
                     orientation=o)
 
     def _show(self, key):
+        if key == self._current:               # already on the DMD: leave it alone
+            return
         enc = self._encoded.get(key)
         if enc is None:
             enc = self._encoded[key] = self.dmd._encode_image(self._image(key))
@@ -298,6 +301,7 @@ class Rig(_RigBase):
         # on every call (OTF mode was entered once, in __enter__).
         self.dmd._patterns = [enc]
         self.dmd.display_pattern(0)
+        self._current = key
         time.sleep(self.a.dmd_settle_s)
 
     def show_lines(self, offsets, width):
@@ -415,12 +419,20 @@ class SimRig(_RigBase):
     def _line_mirrors_pass(self):
         return self.a.line_on != self.OFF_MIRRORS_PASS
 
+    def _same(self, key):
+        same, self._current = key == getattr(self, "_current", None), key
+        return same
+
     def show_lines(self, offsets, width):
+        if self._same(("lines", tuple(int(round(o)) for o in offsets), int(width))):
+            return
         self.clock += 0.3
         T = np.clip(sum(self._band(*line_rows(o, width)) for o in offsets), 0, 1)
         self.T = T if self._line_mirrors_pass() else self._band(*row_limits(self.a)) - T
 
     def show_all(self, passing):
+        if self._same(("all", bool(passing))):
+            return
         self.clock += 0.3
         light = passing == self._line_mirrors_pass()
         self.T = self._band(*row_limits(self.a)) if light else np.zeros_like(self.wl)
