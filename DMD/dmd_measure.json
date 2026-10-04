@@ -1,0 +1,16 @@
+{
+  "calibration_file": null,
+  "line_width_rows": 20,
+  "exposure_ms": null,
+
+  "scan_start_nm": null,
+  "scan_stop_nm": null,
+  "scan_step_nm": 5,
+
+  "band_halfwidth_nm": null,
+  "search_nm": 5,
+  "min_signal_counts": 100,
+
+  "show_plots": true,
+  "notes": ""
+}

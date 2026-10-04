@@ -1,0 +1,33 @@
+{
+  "dmd_width": 1920,
+  "dmd_height": 1080,
+  "orientation": 90,
+  "line_on": false,
+  "dmd_settle_s": 0.3,
+
+  "spectrometer_id": null,
+  "hw_average": 5,
+  "full_scale_counts": 65535,
+  "background": "dmd",
+  "background_frames": 3,
+
+  "data_dir": null,
+
+  "offset_start": -900,
+  "offset_stop": 900,
+  "offset_step": 20,
+  "line_width_rows": 20,
+  "exposure_ms": null,
+
+  "wl_min_nm": 400,
+  "wl_max_nm": 900,
+  "min_peak_counts": 300,
+  "peak_method": "centroid",
+  "peak_threshold_rel": 0.5,
+  "fit_order": 3,
+  "max_residual_nm": 1.0,
+
+  "show_plots": true,
+  "notes": "",
+  "simulate": false
+}

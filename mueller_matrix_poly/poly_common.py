@@ -184,11 +184,14 @@ def signal_counts(sw):
 
 def clipped(counts, full_scale):
     """Spectra (rows) that reached full scale: at >= 98 % of it, or with a
-    plateau of >= 3 pixels exactly at the spectrum maximum (what a clipped
-    detector gives even if full_scale_counts is set wrong)."""
+    plateau of >= 3 pixels exactly at the spectrum maximum while that maximum
+    is in the upper half of the range (what a clipped detector gives even if
+    full_scale_counts is set wrong; a dim, noisy spectrum can repeat a value
+    by chance, so a plateau low down is not clipping)."""
     c = np.atleast_2d(counts)
-    at_max = (c == c.max(axis=1, keepdims=True)).sum(axis=1) >= 3
-    return (c.max(axis=1) >= 0.98 * full_scale) | (at_max & (c.max(axis=1) > 0))
+    peak = c.max(axis=1)
+    at_max = (c == peak[:, None]).sum(axis=1) >= 3
+    return (peak >= 0.98 * full_scale) | (at_max & (peak > 0.5 * full_scale))
 
 
 def has_reference(sw) -> bool:
