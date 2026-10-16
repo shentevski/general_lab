@@ -20,8 +20,11 @@ A menu (q quits):
   2  scan, saved in <data_dir>/scan/<date>_<time>_<type>/:
      1  one peak stepped from start to stop: the whole scan with the sample
         IN, then the whole scan with it OUT;
-     2  the same, plus a stationary peak at a wavelength you choose, shown
-        together with the scanning one at every step.
+     2  scanning + stationary peak: do the two wavelengths together do
+        something? At every step: the scanning line alone, both lines, the
+        stationary line alone. If nothing happens, both = scan + stat; the
+        excess (sample IN, and sample OUT as the control) and the extra
+        absorbance when both are on are reported with their significance.
 
 Frames: every spectrum is taken that many times (each one a separate
 spectrum of hw_average x exposure). Results are the mean over the frames;
@@ -553,21 +556,29 @@ def plot_interaction(a, path, meta, res, wl, delta, stat, n):
         return
     suf = a.error
     x = res["cal_nm"]
-    fig, ax = plt.subplots(3, 1, figsize=(11, 13), sharex=True,
-                           gridspec_kw={"height_ratios": [1, 1, 1.3]})
+    # the colorbar gets its own column, so the three panels keep the same width
+    # and the same wavelength sits at the same place in all of them
+    fig = plt.figure(figsize=(12, 13))
+    gs = fig.add_gridspec(3, 2, width_ratios=[1, 0.025], height_ratios=[1, 1, 1.3],
+                          wspace=0.03, hspace=0.42, left=0.1, right=0.92, top=0.93,
+                          bottom=0.05)
+    ax = [fig.add_subplot(gs[0, 0])]
+    ax += [fig.add_subplot(gs[i, 0], sharex=ax[0]) for i in (1, 2)]
+    cax = fig.add_subplot(gs[2, 1])
     bars = dict(ms=4, capsize=3, elinewidth=1)
     for s, label in (("out", "sample out (control)"), ("in", "sample in")):
         ax[0].errorbar(x, res[f"excess_{s}_pct"], yerr=res[f"excess_{s}_pct_{suf}"],
                        fmt="o-", label=label, **bars)
     ax[0].axhline(0, color="k", lw=0.8)
-    ax[0].set(ylabel="excess light (%)",
+    ax[0].set(ylabel="excess light (%)", xlabel="scanning peak wavelength (nm)",
               title=f"{meta['stamp']}: both together vs each alone, stationary peak "
                     f"{stat['cal_nm']:.1f} nm\n{error_note(a, n)}")
     legend_with_error(ax[0], res[f"excess_in_pct_{suf}"])
     ax[1].errorbar(x, res["extra_absorbance"], yerr=res[f"extra_absorbance_{suf}"],
                    fmt="o-", color="C3", label="sample in, corrected by the control", **bars)
     ax[1].axhline(0, color="k", lw=0.8)
-    ax[1].set(ylabel="extra absorbance\nwhen both are on")
+    ax[1].set(ylabel="extra absorbance",
+              xlabel="scanning peak wavelength (nm)")
     legend_with_error(ax[1], res[f"extra_absorbance_{suf}"])
 
     lo, hi = meta["view_nm"]
@@ -578,13 +589,12 @@ def plot_interaction(a, path, meta, res, wl, delta, stat, n):
                           vmin=-lim, vmax=lim, shading="flat")
     ax[2].plot(x, x, color="0.4", lw=0.8, ls="--")
     ax[2].axhline(stat["cal_nm"], color="0.4", lw=0.8, ls="--")
-    fig.colorbar(im, ax=ax[2], label="both - scan - stat (counts)", pad=0.01)
+    fig.colorbar(im, cax=cax, label="both - scan - stat (counts)")
     ax[2].set(ylabel="spectrometer wavelength (nm)",
               xlabel="scanning peak wavelength (nm)",
               title="per pixel, sample in (0 = no effect)")
     for xx in ax:
         xx.axvline(stat["cal_nm"], color="0.6", ls=":", lw=1)
-    fig.tight_layout()
     finish_figure(plt, fig, path, a.show_plots)
 
 

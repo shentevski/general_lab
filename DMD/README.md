@@ -89,21 +89,29 @@ refused. Files go in `<data_dir>/single/` as `<date>_<time>_<n>wl_*`:
 **2 = scan.** Choose start, stop and step (nm), the exposure and the frames. The whole scan
 runs with the sample IN, then the whole scan with it OUT, so the sample is moved only once.
 - **1 = one peak:** one line steps across the range.
-- **2 = scanning + stationary peak:** a second line stays at the wavelength you choose,
-  displayed together with the scanning one at every step. Steps where the two lines would
-  overlap on the DMD are skipped. Steps where their peaks' integration windows overlap are
-  NaN in the analysis.
+- **2 = scanning + stationary peak:** tests whether the two wavelengths together do
+  something that each alone doesn't. At every step the DMD shows three patterns, each for
+  the full number of frames:
+  1. the scanning line alone;
+  2. both lines;
+  3. the stationary line alone.
+
+  A step takes about 3× as long as in scan 1. Steps where the two lines would overlap on
+  the DMD (closer than `line_width_rows`, ~3 nm) are skipped. That is the only gap: each
+  peak's own transmission comes from the spectra where it is alone, so overlapping peaks
+  in the spectrometer don't matter. See [Two wavelengths together](#two-wavelengths-together).
 
 Files go in `<data_dir>/scan/<date>_<time>_1peak/` (or `_2peak/`), all prefixed with the
 date and time:
-- `sample_in.csv`, `sample_out.csv`: mean of the frames − background, one column per step;
-- `sample_in_std.csv`, `sample_out_std.csv`: the per‑pixel standard deviation of the frames;
+- `sample_in.csv`, `sample_out.csv`: mean of the frames − background, one column per step.
+  In scan 2 there is one file per pattern: `sample_in_scan.csv`, `sample_in_both.csv`,
+  `sample_in_stat.csv`, and the same for `out`;
+- the same with `_std`: the per‑pixel standard deviation of the frames;
 - `steps.csv`, `background.csv`, `frames.npz` (every frame, raw) and `meta.json`.
 
 The scan prints how far the measured peak centres are from the calibration, as a running
 check of it. In scan 2, it also prints how steady the stationary peak's in/out ratio is over
-the scan: a spread there is source drift between the two passes, or the scanning light
-acting on the sample.
+the scan (alone): a spread there is source drift.
 
 ### Analysis
 
@@ -128,6 +136,54 @@ left out (NaN) where the sample‑out signal is below `min_signal_counts`.
 
 A peak is integrated over its centre ± `band_halfwidth_nm` (null: ± its FWHM). The centre is
 found in the sample‑OUT spectrum within `search_nm` of the calibrated wavelength.
+
+### Two wavelengths together
+
+Scan 2 only. If the wavelengths don't act on each other, the light with both lines on is
+the sum of each alone, pixel by pixel:
+
+```
+both = scan + stat        →   excess light  = Σ both / Σ (scan + stat) − 1
+```
+
+Σ runs over the two peaks' windows. It is computed for every step with the sample IN, and
+with the sample OUT as the **control**. With nothing in the beam, the control must be zero;
+whatever is left is the instrument (detector nonlinearity where the peaks overlap, scatter
+that depends on the pattern, drift between the three patterns). The result corrected by
+the control is
+
+```
+extra absorbance = −log10[ (1 + excess_in) / (1 + excess_out) ]
+```
+
+It is positive if the sample absorbs more when both wavelengths are on.
+
+Output:
+- **Printed:**
+  - the excess light for the control and the sample, each with a chi2 per step. Near 1
+    means noise only. A control well above 1 means the instrument or drift adds noise, and
+    the significance below is overstated;
+  - the extra absorbance, with the steps beyond 3 standard errors listed, or "no effect
+    beyond the noise". Significance always uses the standard error of the mean, whatever
+    `error` is set to.
+- **`<…>_results.csv`:** `excess_in_pct`, `excess_out_pct`, `extra_absorbance` (each with
+  its error), `extra_absorbance_z` (value / standard error), and `other_in_counts` /
+  `other_out_counts`: excess light **outside** the two peaks, which is where new light such
+  as emission would appear.
+- **`<…>_interaction_in.csv`, `<…>_interaction_out.csv`:** both − scan − stat per pixel, one
+  column per step.
+- **`<…>_interaction.png`:**
+  - the excess light (IN and control);
+  - the extra absorbance;
+  - a map of both − scan − stat per pixel (sample IN) against the scanning wavelength. With
+    no effect it is noise everywhere. An effect shows up as a feature on the scanning
+    peak's diagonal or on the stationary peak's horizontal line.
+
+Checked in simulation:
+- **No effect:** all steps within 3 standard errors (largest 2.3), chi2 per step 0.83.
+- **Injected effect** (1 % extra absorption when both are on, around a scanning wavelength
+  of 650 nm, i.e. extra absorbance 0.0044): found at 640–660 nm, 0.0047 ± 0.0009 at 650 nm.
+  The residual from the injected curve had chi2 per step 0.81.
 
 ### Error bars
 
