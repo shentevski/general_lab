@@ -8,19 +8,23 @@ The spectral version of ../mueller_matrix/measure_mueller.py: the same layout
 and procedure, with the laser replaced by a broadband LED (MBB1F1, 470-850 nm)
 and the signal power meter by a CCT10 spectrometer.
 
-    LED -> collimator -> polarizer -> beamsplitter -> HWP / QWP -> [sample] -> QWP (rotating) -> analyzer -> fibre -> CCT10
-                                           |                                    '------------ polarimeter ------------'
-                                           '-> reference power meter (optional LED monitor)
+    LED -> collimator -> polarizer (V) -> beamsplitter -> HWP -> QWP -> [sample] -> QWP (rotating) -> analyzer -> fibre -> CCT10
+                                               |          '-- PSG --'              '------------ polarimeter ------------'
+                                               '-> reference power meter (optional LED monitor)
 
 At every QWP step a whole spectrum is recorded, so one run gives M at every
-wavelength. For each input state, as before:
+wavelength. With use_psg (the default) the PSG -- the motorized HWP and QWP,
+driven by polarization_toolkit -- sets the states listed in `states`. For
+each state, as before:
 
-    1. set the state by hand and type a label for it
+    1. the PSG sets the state (use_psg false: you set it by hand and type a label)
     2. REMOVE the sample      -> the input state is measured
     3. PUT THE SAMPLE BACK    -> the state is measured through the sample
 
-Enter with no label to finish. After every state it reports how well the
-states pin down M -- now at every wavelength, and the worst one counts.
+The PSG is calibrated at one wavelength (the 520 nm laser): its states are
+exact there and elliptical elsewhere, which is fine -- they are measured.
+After every state it reports how well the states pin down M -- at every
+wavelength, and the worst one counts.
 
 Why this layout suits a spectrometer
   * the analyzer is fixed, so the light entering the spectrometer always has
@@ -73,6 +77,9 @@ from poly_common import (angles_of, bin_edges, bin_matrix, calibration_at,
                          float_or_none, has_reference, parse_with_config,
                          psa_blind, reference_factor, resolve_path,
                          signal_counts, str2bool, write_sweep)
+from polarization_toolkit.errors import ToolkitError
+from polarization_toolkit.psg import (PSG, SIX_STATES, SimulatedPSG, coverage as psg_coverage,
+                                      sphere_angle_deg, state_label)
 
 HERE = Path(__file__).resolve().parent
 
@@ -83,14 +90,16 @@ HERE = Path(__file__).resolve().parent
 
 
 class Rig:
-    """QWP rotation stage + CCT10 (+ reference PM100D).
-    set_state / set_sample / set_led are no-ops: on the bench YOU do those."""
+    """QWP rotation stage + CCT10 (+ reference PM100D) + the PSG (use_psg).
+    Without the PSG, set_state is a no-op: you set the states by hand.
+    set_sample / set_led are no-ops: on the bench YOU do those."""
 
     def __init__(self, a):
         self.a = a
         self.spec = self.ref = self.qwp = None
         self.t0 = time.time()
         self.wl = None
+        self.psg = PSG.from_files() if getattr(a, "use_psg", False) else None
 
     def __enter__(self):
         import kcube
@@ -134,9 +143,17 @@ class Rig:
         self.qwp.connect()
         if self.a.home:
             self.qwp.home()
+        if self.psg is not None:
+            try:
+                self.psg.__enter__()
+            except BaseException:
+                self.__exit__(None, None, None)
+                raise
         return self
 
     def __exit__(self, *exc):
+        if self.psg is not None:
+            self.psg.__exit__(*exc)
         for obj in (self.spec, self.ref, self.qwp):
             try:
                 obj and obj.close()
@@ -184,12 +201,15 @@ class Rig:
     def move_to(self, deg):      self.qwp.move_to(float(deg) % 360.0)
     def move_relative(self, d):  self.qwp.move_relative(float(d))
     def position(self):          return float(self.qwp.get_position())
-    def set_state(self, label):  pass
     def set_sample(self, inside): pass
     def set_led(self, on):       pass
 
+    def set_state(self, spec):
+        return self.psg.set_state(spec) if self.psg is not None else None
+
     def describe(self):
         return {"backend": "hardware", "qwp_motor": self.a.qwp_motor,
+                "psg": self.psg.describe() if self.psg is not None else None,
                 "spectrometer": self.spec.device_id,
                 "exposure_ms": self.exposure_ms, "hw_average": self.hw_average,
                 "reference_meter": str(self.ref.identity) if self.ref else None,
@@ -251,9 +271,12 @@ class SimRig:
     * the input polarizer: extinction sim_polarizer_er in 510-800 nm, falling
       to a tenth of it at 470 and 850 (LPVISC-like), so the states are NOT
       fully polarized -- an unpolarized LED only gets DOP = 1 - 2/ER;
-    * the states: H = polarizer only; V D A with a zero-order HWP, R L with a
-      zero-order QWP, both designed for 520 nm -- elliptical elsewhere, set
-      by hand with sim_state_error_deg errors;
+    * the states: with use_psg, a simulated PSG (polarization_toolkit) whose
+      plates are zero-order quartz with its TRUE retardances at 520 nm; it
+      solves with its calibration in ~/.poltk/simulated. By hand: H =
+      polarizer only; V D A with a zero-order HWP, R L with a zero-order QWP,
+      both designed for 520 nm, set with sim_state_error_deg errors. Either
+      way the states are elliptical away from 520 nm;
     * the polarimeter QWP: the calibration in the config (file or constant)
       IS the truth, unless the characterization changes it on purpose;
     * the sample: a partial diattenuator (D ~ 0.3 at 15 deg), then a quartz
@@ -302,8 +325,12 @@ class SimRig:
         self.clock = 0.0
         self.has_ref = bool(a.ref_pm_serial)
         self.exposure_ms, self.hw_average = (a.exposure_ms or 10.0), a.hw_average
+        self.psg = (SimulatedPSG.from_files(simulate=True)
+                    if getattr(a, "use_psg", False) else None)
 
     def __enter__(self):
+        if self.psg is not None:
+            self.psg.__enter__()
         print("spectrometer    : simulated (2048 px, 200-1000 nm)")
         print("reference meter : " + ("simulated (LED monitor)" if self.has_ref else
                                       "none (ref_pm_serial is null) -- no LED correction"))
@@ -333,9 +360,19 @@ class SimRig:
                 "psa_zero_deg": np.broadcast_to(self.psa_zero, self.wl.shape),
                 "input_dop": self.p_in}
 
-    def set_state(self, label):
-        self.clock += self.STATE_S
-        self.state = self._make_state(label)
+    def set_state(self, spec):
+        if self.psg is None:
+            self.clock += self.STATE_S
+            self.state = self._make_state(spec)
+            return None
+        self.clock += 5.0                                   # the PSG stages moving
+        setting = self.psg.set_state(spec)
+        t = self.psg.truth
+        S = self.psg.stokes(hwp_waves=quartz_waves(self.wl, t.hwp_retardance_waves, 520),
+                            qwp_waves=quartz_waves(self.wl, t.qwp_retardance_waves, 520))
+        S[:, 1:] *= self.p_in[:, None]          # the polarizer is not perfect
+        self.state = S
+        return setting
 
     def set_sample(self, inside):
         self.clock += self.SWAP_S
@@ -394,6 +431,7 @@ class SimRig:
                 "sim_led_drift_rel": self.a.sim_led_drift_rel,
                 "sim_led_noise_rel": self.a.sim_led_noise_rel,
                 "sim_stray_rel": self.a.sim_stray_rel,
+                "psg": self.psg.describe() if self.psg is not None else None,
                 "truth": "sim_truth.npz"}
 
 
@@ -649,6 +687,8 @@ def hardware_args(ap):
     ap.add_argument("--block-at-start", type=str2bool, default=True, dest="block_at_start",
                     help="block the LED at the start: zero the reference meter and "
                          "measure the ambient light")
+    ap.add_argument("--use-psg", type=str2bool, default=True, dest="use_psg",
+                    help="the PSG sets the states (false: you set them by hand)")
     ap.add_argument("--out", default=None, help="output root (default: Desktop)")
     ap.add_argument("--notes", default="")
     ap.add_argument("--simulate", action="store_true")
@@ -666,6 +706,77 @@ def hardware_args(ap):
     ap.add_argument("--sim-stray-rel", type=float, default=0.002, dest="sim_stray_rel")
 
 
+def plan_states(psg, specs):
+    """The PSG settings of every state, and whether together they can
+    reconstruct M (at the PSG's calibration wavelength) -- before measuring."""
+    wl = psg.cal.wavelength_nm or 520.0
+    print(f"\nstates (PSG, solved at {wl:g} nm)" + ("" if psg.cal.calibrated else
+                                                 "  -- NOMINAL model, the PSG is not calibrated"))
+    plans = []
+    for k, spec in enumerate(specs, 1):
+        try:
+            s = psg.solve(spec)
+        except ValueError as e:
+            raise SystemExit(f"states, entry {k}: {e}") from None
+        plans.append(s)
+        print(f"  {k}. {s.label:10s} HWP {s.hwp_deg:7.2f}  QWP {s.qwp_deg:7.2f}   "
+              f"model miss {s.error_deg:.3f} deg")
+    rank, cond = psg_coverage([s.predicted for s in plans])
+    if rank < 4:
+        raise SystemExit(f"these states cannot reconstruct M (rank {rank} of 4): use at "
+                         f"least 4, including a circular one (R or L)")
+    print(f"  predicted coverage at {wl:g} nm: condition number {cond:.2f} (1.73 = best "
+          f"possible); elsewhere the coverage check after each state shows it")
+    if not psg.cal.calibrated:
+        print("  NOTE: not calibrated, so the states can be far from their targets. They\n"
+              "  are measured, so M is still right -- but run `poltk psg calibrate` first.")
+    return plans
+
+
+def measure_state(r, a, run, idx, cal):
+    """Sample out -> the input sweep, sample in -> the through-sample sweep.
+    Saves both and prints the live feedback; returns the two fits."""
+    fits = {}
+    for side, prompt, tag in (
+            ("in", "REMOVE the sample, then press Enter to measure the input state...",
+             "input"),
+            ("out", "PUT THE SAMPLE BACK, then press Enter to measure through it...",
+             "output")):
+        input(prompt)
+        r.set_sample(side == "out")
+        sw = sweep(r, a, tag, a.qwp_sweep_deg)
+        write_sweep(run / f"state_{idx:02d}_{side}.npz", sw)
+        fits[side] = quick_stokes(sw, a, cal, run, a.feedback_bin_nm)
+        print(f"  {sweep_health(sw, a)}")
+        show_stokes(fits[side], a.show_wl_nm, "S_in  (sample out)" if side == "in"
+                    else "S_out (through sample)")
+    return fits
+
+
+def report_coverage(S_in, wl, cal, run):
+    if psa_blind(calibration_at(cal, wl, run, strict=False)["retardance_deg"]).any():
+        print("  NOTE: the polarimeter QWP is close to 0 or 180 deg retardance "
+              "somewhere in the band -- it is nearly blind there")
+    rank, cond = coverage(np.stack(S_in, -1))
+    if rank.min() < 4:
+        bad = wl[rank < 4]
+        circ = np.abs(np.stack(S_in, -1)[:, 3] / np.stack(S_in, -1)[:, 0]).max(1)
+        hint = ("add a state with a circular component (e.g. R or L)"
+                if len(S_in) >= 3 and (circ[rank < 4] < 0.2).all()
+                else "need at least 4 states")
+        where = (f"{bad[0]:.0f} nm" if bad.size == 1 else
+                 f"{bad.size} wavelengths in {bad[0]:.0f}-{bad[-1]:.0f} nm")
+        print(f"  saved. states {len(S_in)} | rank < 4 at {where} -- {hint}")
+    else:
+        worst = int(np.argmax(cond))
+        verdict = ("good" if cond[worst] < 4 else
+                   "usable -- spread the states more" if cond[worst] < 10 else
+                   "POOR -- states too similar there")
+        print(f"  saved. states {len(S_in)} | rank 4 everywhere, condition number "
+              f"median {np.median(cond):.2f}, worst {cond[worst]:.2f} at "
+              f"{wl[worst]:.0f} nm ({verdict}; 1.73 is the best possible)")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -674,6 +785,9 @@ def main(argv=None) -> int:
                     help="bin width of the live feedback (the analysis sets its own)")
     ap.add_argument("--show-wl-nm", type=float, nargs="*",
                     default=[500, 550, 600, 650, 700, 750, 800], dest="show_wl_nm")
+    ap.add_argument("--states", nargs="+", default=list(SIX_STATES),
+                    help="input states for the PSG: names here; in the JSON also "
+                         "[S1, S2, S3] or {\"azimuth_deg\": .., \"ellipticity_deg\": ..}")
     a = parse_with_config(ap, argv, HERE / "measure_mueller_poly.json")
 
     root = Path(a.out) if a.out else Path.home() / "Desktop"
@@ -704,74 +818,67 @@ def main(argv=None) -> int:
         if a.simulate:
             np.savez_compressed(run / "sim_truth.npz", **r.truth())
         amb = start(r, a)
-        print("\nEXPOSURE: set a BRIGHT state (H or R), sample OUT, then type an "
-              "exposure -- the script shows how full the brightest pixel gets.")
+        if r.psg is not None:
+            r.set_state("H")
+            print("\nEXPOSURE: the PSG set H; take the sample OUT, then type an exposure "
+                  "-- the script shows how full the brightest pixel gets.")
+        else:
+            print("\nEXPOSURE: set a BRIGHT state (H or R), sample OUT, then type an "
+                  "exposure -- the script shows how full the brightest pixel gets.")
         check_exposure(r, a)
         ambient_report(amb, r, a)
         print(f"  exposure for the whole run: {r.exposure_ms:g} ms x {r.hw_average} frames")
         save()
 
-        S_in, idx = [], 0
-        while True:
-            idx += 1
-            print(f"\n=== state {idx} ===")
-            label = input("Set the input state by hand, then type a label for it"
-                          "\n  (e.g. H, D, R -- approximate is fine; Enter = finish): ").strip()
-            if not label:
-                rank = coverage(np.stack(S_in, -1))[0].min() if S_in else 0
-                if rank < 4:
-                    ans = input(f"Only rank {rank} of 4 at some wavelengths -- the "
-                                f"analysis cannot reconstruct M there. Finish anyway? "
-                                f"[y/N]: ").strip().lower()
-                    if ans != "y":
-                        idx -= 1
-                        continue
-                break
-            r.set_state(label)
-
-            fits = {}
-            for side, prompt, tag in (
-                    ("in", "REMOVE the sample, then press Enter to measure the input state...",
-                     "input"),
-                    ("out", "PUT THE SAMPLE BACK, then press Enter to measure through it...",
-                     "output")):
-                input(prompt)
-                r.set_sample(side == "out")
-                sw = sweep(r, a, tag, a.qwp_sweep_deg)
-                write_sweep(run / f"state_{idx:02d}_{side}.npz", sw)
-                fits[side] = quick_stokes(sw, a, cal, run, a.feedback_bin_nm)
-                print(f"  {sweep_health(sw, a)}")
-                show_stokes(fits[side], a.show_wl_nm, "S_in  (sample out)" if side == "in"
-                            else "S_out (through sample)")
-
-            meta["states"].append({"index": idx, "label": label,
-                                   "input": f"state_{idx:02d}_in.npz",
-                                   "output": f"state_{idx:02d}_out.npz"})
-            save()
-            S_in.append(fits["in"]["S"].T)                  # (N, 4)
-            wl = fits["in"]["wl"]
-            if psa_blind(calibration_at(cal, wl, run, strict=False)["retardance_deg"]).any():
-                print("  NOTE: the polarimeter QWP is close to 0 or 180 deg retardance "
-                      "somewhere in the band -- it is nearly blind there")
-
-            rank, cond = coverage(np.stack(S_in, -1))
-            if rank.min() < 4:
-                bad = wl[rank < 4]
-                circ = np.abs(np.stack(S_in, -1)[:, 3] / np.stack(S_in, -1)[:, 0]).max(1)
-                hint = ("add a state with a circular component (e.g. R or L)"
-                        if len(S_in) >= 3 and (circ[rank < 4] < 0.2).all()
-                        else "need at least 4 states")
-                where = (f"{bad[0]:.0f} nm" if bad.size == 1 else
-                         f"{bad.size} wavelengths in {bad[0]:.0f}-{bad[-1]:.0f} nm")
-                print(f"  saved. states {len(S_in)} | rank < 4 at {where} -- {hint}")
-            else:
-                worst = int(np.argmax(cond))
-                verdict = ("good" if cond[worst] < 4 else
-                           "usable -- spread the states more" if cond[worst] < 10 else
-                           "POOR -- states too similar there")
-                print(f"  saved. states {len(S_in)} | rank 4 everywhere, condition number "
-                      f"median {np.median(cond):.2f}, worst {cond[worst]:.2f} at "
-                      f"{wl[worst]:.0f} nm ({verdict}; 1.73 is the best possible)")
+        S_in = []
+        if r.psg is not None:
+            plan_states(r.psg, a.states)
+            for idx, spec in enumerate(a.states, 1):
+                print(f"\n=== state {idx} of {len(a.states)}: {state_label(spec)} ===")
+                setting = r.set_state(spec)
+                print(f"  PSG: HWP {setting.hwp_deg:.2f} deg, QWP {setting.qwp_deg:.2f} deg "
+                      f"(model: {setting.error_deg:.2f} deg from the target at "
+                      f"{r.psg.cal.wavelength_nm or 520:g} nm)")
+                fits = measure_state(r, a, run, idx, cal)
+                wl = fits["in"]["wl"]
+                k = int(np.argmin(np.abs(wl - (r.psg.cal.wavelength_nm or 520.0))))
+                miss = float(sphere_angle_deg(fits["in"]["S"][:, k], setting.target))
+                print(f"  measured input at {wl[k]:.0f} nm is {miss:.2f} deg from the target "
+                      f"on the Poincare sphere")
+                meta["states"].append({"index": idx, "label": setting.label,
+                                       "input": f"state_{idx:02d}_in.npz",
+                                       "output": f"state_{idx:02d}_out.npz",
+                                       "psg": setting.to_dict(), "input_miss_deg": miss,
+                                       "input_miss_wl_nm": float(wl[k])})
+                save()
+                S_in.append(fits["in"]["S"].T)                  # (N, 4)
+                report_coverage(S_in, wl, cal, run)
+        else:
+            idx = 0
+            while True:
+                idx += 1
+                print(f"\n=== state {idx} ===")
+                label = input("Set the input state by hand, then type a label for it"
+                              "\n  (e.g. H, D, R -- approximate is fine; Enter = finish): "
+                              ).strip()
+                if not label:
+                    rank = coverage(np.stack(S_in, -1))[0].min() if S_in else 0
+                    if rank < 4:
+                        ans = input(f"Only rank {rank} of 4 at some wavelengths -- the "
+                                    f"analysis cannot reconstruct M there. Finish anyway? "
+                                    f"[y/N]: ").strip().lower()
+                        if ans != "y":
+                            idx -= 1
+                            continue
+                    break
+                r.set_state(label)
+                fits = measure_state(r, a, run, idx, cal)
+                meta["states"].append({"index": idx, "label": label,
+                                       "input": f"state_{idx:02d}_in.npz",
+                                       "output": f"state_{idx:02d}_out.npz"})
+                save()
+                S_in.append(fits["in"]["S"].T)                  # (N, 4)
+                report_coverage(S_in, fits["in"]["wl"], cal, run)
 
     print(f"\n{len(meta['states'])} states saved in {run}")
     print("Analyse with: python analyze_mueller_poly.py   "
@@ -780,4 +887,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except ToolkitError as e:
+        sys.exit(f"error: {e}")

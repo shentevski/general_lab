@@ -6,22 +6,28 @@
 
 Optical layout
 
-    laser -> polarizer -> beamsplitter -> HWP / QWP -> [sample] -> QWP (rotating) -> analyzer -> power meter
-                               |                                   '------------ polarimeter ------------'
-                               '-> reference power meter (laser monitor)
+    laser -> polarizer (V) -> beamsplitter -> HWP -> QWP -> [sample] -> QWP (rotating) -> analyzer -> power meter
+                                   |          '-- PSG --'              '------------ polarimeter ------------'
+                                   '-> reference power meter (laser monitor)
 
-For each input state:
+With use_psg (the default) the PSG -- the motorized HWP and QWP, driven by
+polarization_toolkit -- sets the input states listed in `states` (names
+H V D A R L, Stokes vectors [S1, S2, S3], or {"azimuth_deg", "ellipticity_deg"}).
+Its settings and calibration are read from ~/.poltk (`poltk psg show`). For
+each state:
 
-    1. you set the state by hand and type a label for it
+    1. the PSG sets the state
     2. you REMOVE the sample      -> the script measures the input state
     3. you PUT THE SAMPLE BACK    -> the script measures through the sample
 
-and repeat as many times as you like. After every state it reports how well
-the states you have so far pin down M (rank and condition number); press
-Enter with no label to finish.
+With use_psg false you set each state by hand and type a label for it
+instead, as many as you like (Enter with no label finishes). Either way it
+reports after every state how well the states so far pin down M (rank and
+condition number).
 
 The states do NOT need to be exact. Each one is measured, not assumed, so an
-approximate H or R is as good as a perfect one. What matters is that
+approximate H or R is as good as a perfect one (the PSG's calibration makes
+them accurate, but M does not depend on it). What matters is that
 
   * the state does not change between its "input" and "through sample"
     measurements -- don't touch the polarizer optics in between,
@@ -47,13 +53,17 @@ import argparse
 import json
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
 from mueller_common import (corrected_power, extract_stokes, has_reference,
                             parse_with_config, waves_to_deg, write_sweep)
+from polarization_toolkit.errors import ToolkitError
+from polarization_toolkit.hardware.pm_polarimeter import (  # noqa: F401  (_setup_meter:
+    PowerMeterPolarimeter, PSAConfig, _setup_meter, pm_sweep)  # measure_transmission)
+from polarization_toolkit.psg import (PSG, SIX_STATES, SimulatedPSG, coverage as psg_coverage,
+                                      sphere_angle_deg, state_label)
 
 HERE = Path(__file__).resolve().parent
 
@@ -63,152 +73,61 @@ HERE = Path(__file__).resolve().parent
 # --------------------------------------------------------------------------- #
 
 
-def _setup_meter(pm, a, range_w):
-    pm.power_unit = "W"
-    pm.wavelength_nm = a.wavelength_nm
-    pm.average_count = a.pm_average_count      # same window on both meters
-    if range_w is None:
-        pm.auto_range = True
-    else:
-        pm.auto_range = False
-        pm.power_range_w = range_w
+def str2bool(v):
+    return str(v).lower() in ("1", "true", "yes", "y", "on")
 
 
-def _pick_meters(a):
-    """Resource names of the signal and reference meters, found by serial."""
-    from thorlabs_powermeter import list_power_meters
-
-    found = list_power_meters()
-    print("Power meters found:")
-    for d in found:
-        print(f"    {d.serial_number:12s} {d.model:10s} {d.resource_name}")
-
-    def by_serial(serial, role):
-        hits = [d for d in found
-                if d.serial_number == serial or str(serial) in d.resource_name]
-        if not hits:
-            raise SystemExit(f"{role} power meter '{serial}' not found -- "
-                             f"check the serial in measure_mueller.json")
-        return hits[0].resource_name
-
-    ref = by_serial(a.ref_pm_serial, "reference") if a.ref_pm_serial else None
-    if a.pm_serial:
-        sig = by_serial(a.pm_serial, "signal")
-    else:
-        others = [d.resource_name for d in found if d.resource_name != ref]
-        if len(others) != 1:
-            raise SystemExit(
-                f"{len(others)} candidate signal meters -- set pm_serial (signal, "
-                f"after the analyzer) and ref_pm_serial (laser monitor) in "
-                f"measure_mueller.json, using the serials listed above")
-        sig = others[0]
-    if sig == ref:
-        raise SystemExit("pm_serial and ref_pm_serial are the same meter")
-    return sig, ref
-
-
-class Rig:
-    """QWP rotation stage + signal PM100D (+ reference PM100D).
-    set_state / set_sample are no-ops: on the bench YOU do those by hand."""
+class Rig(PowerMeterPolarimeter):
+    """The polarimeter (QWP stage + signal / reference PM100D, from the
+    toolkit) and -- with use_psg -- the PSG, which sets the input states.
+    Without the PSG, set_state is a no-op: you set the states by hand.
+    set_sample is a no-op: you move the sample."""
 
     def __init__(self, a):
-        self.a = a
-        self.pm = self.ref = self._pool = None
-        self.parallel = True
-        self.t0 = time.time()
+        super().__init__(PSAConfig.from_mapping(a))
+        self.psg = PSG.from_files() if getattr(a, "use_psg", False) else None
 
     def __enter__(self):
-        import kcube
-        from thorlabs_powermeter import PowerMeter
-
-        sig_res, ref_res = _pick_meters(self.a)
-        self.pm = PowerMeter(sig_res)
-        _setup_meter(self.pm, self.a, self.a.power_range_w)
-        print(f"signal meter    : {self.pm.identity.serial_number}")
-        if ref_res:
-            self.ref = PowerMeter(ref_res)
-            _setup_meter(self.ref, self.a, self.a.ref_power_range_w)
-            self._pool = ThreadPoolExecutor(max_workers=1)
-            print(f"reference meter : {self.ref.identity.serial_number} (laser monitor)")
-        else:
-            print("reference meter : none (ref_pm_serial is null) -- no laser correction")
-
-        stage = None if str(self.a.qwp_stage).lower() in ("", "none") else self.a.qwp_stage
-        self.qwp = kcube.KCube(self.a.qwp_motor, stage_name=stage)
-        self.qwp.connect()
-        if self.a.home:
-            self.qwp.home()
+        super().__enter__()
+        if self.psg is not None:
+            try:
+                self.psg.__enter__()
+            except BaseException:
+                super().__exit__(None, None, None)
+                raise
         return self
 
     def __exit__(self, *exc):
-        if self._pool:
-            self._pool.shutdown(wait=True)
-        for obj in (self.pm, self.ref, getattr(self, "qwp", None)):
-            try:
-                obj and obj.close()
-            except Exception:
-                pass
-        return False
+        if self.psg is not None:
+            self.psg.__exit__(*exc)
+        return super().__exit__(*exc)
 
-    @property
-    def has_ref(self):
-        return self.ref is not None
+    def set_state(self, spec):
+        return self.psg.set_state(spec) if self.psg is not None else None
 
-    def read(self):
-        """(signal W, reference W). Both meters integrate at the same time;
-        if the driver refuses parallel reads, fall back to reading the
-        reference just before and just after the signal and averaging."""
-        if self.ref is None:
-            return float(self.pm.read_power()), float("nan")
-        if self.parallel:
-            try:
-                fut = self._pool.submit(self.ref.read_power)
-                sig = self.pm.read_power()
-                return float(sig), float(fut.result())
-            except Exception as e:
-                print(f"\n  parallel meter reading failed ({e}); reading them "
-                      f"one after the other from now on")
-                self.parallel = False
-        r1 = self.ref.read_power()
-        sig = self.pm.read_power()
-        r2 = self.ref.read_power()
-        return float(sig), 0.5 * (r1 + r2)
-
-    def zero_meter(self):
-        for pm in (self.pm, self.ref):
-            if pm is not None:
-                pm.zero()
-
-    def now(self):               return time.time() - self.t0
-    def move_to(self, deg):      self.qwp.move_to(float(deg) % 360.0)
-    def move_relative(self, d):  self.qwp.move_relative(float(d))
-    def position(self):          return float(self.qwp.get_position())
-    def set_state(self, label):  pass
-    def set_sample(self, inside): pass
+    def set_sample(self, inside):
+        pass
 
     def describe(self):
-        return {"backend": "hardware", "qwp_motor": self.a.qwp_motor,
-                "qwp_model": getattr(self.qwp, "model", None),
-                "signal_meter": str(self.pm.identity),
-                "reference_meter": str(self.ref.identity) if self.ref else None,
-                "reference_read": (None if not self.ref else "parallel" if self.parallel
-                                   else "sequential (ref before + after signal, averaged)"),
-                "pm_average_count": self.a.pm_average_count,
-                "power_range_w": self.a.power_range_w,
-                "ref_power_range_w": self.a.ref_power_range_w}
+        return {**super().describe(), "psg": self.psg.describe() if self.psg else None}
 
 
 class SimRig:
     """Rehearsal stand-in with a known sample, so a run can be checked.
 
-    Hand-made states are imperfect on purpose (sim_state_error_deg), to show
-    that approximate states still give the right M. The laser drifts and
+    With use_psg the states come from a simulated PSG (polarization_toolkit),
+    whose true optics differ from its calibration in ~/.poltk/simulated as a
+    real one's would. Without it, hand-made states are imperfect on purpose
+    (sim_state_error_deg), to show that approximate states still give the
+    right M. The laser drifts and
     fluctuates (sim_laser_*), seen by both meters, to show what the
     reference removes. Time runs on a virtual clock, so drift is realistic
     even when the rehearsal itself runs in seconds.
     """
 
+    simulated = True
     READ_S = 0.3             # one meter reading
+    PSG_S = 5.0              # the PSG stages moving
     SWAP_S = 20.0            # you taking the sample out / putting it back
     STATE_S = 60.0           # you setting a new state
     DRIFT_PERIOD_S = 900.0
@@ -239,8 +158,12 @@ class SimRig:
         self.clock = 0.0
         self.has_ref = bool(a.ref_pm_serial)
         self.parallel = True
+        self.psg = (SimulatedPSG.from_files(simulate=True)
+                    if getattr(a, "use_psg", False) else None)
 
     def __enter__(self):
+        if self.psg is not None:
+            self.psg.__enter__()
         print("signal meter    : simulated")
         print("reference meter : " + ("simulated (laser monitor)" if self.has_ref else
                                       "none (ref_pm_serial is null) -- no laser correction"))
@@ -249,7 +172,13 @@ class SimRig:
     def __exit__(self, *exc):
         return False
 
-    def set_state(self, label):
+    def set_state(self, spec):
+        if self.psg is not None:
+            self.clock += self.PSG_S
+            setting = self.psg.set_state(spec)
+            self.state = self.psg.stokes()
+            return setting
+        label = spec
         self.clock += self.STATE_S
         nom = self.NOMINAL.get(label.strip().upper())
         if nom is None:
@@ -260,6 +189,7 @@ class SimRig:
         axis = self.rng.uniform(0, np.pi)
         wobble = self._rot(self.rng.normal(0, e)) @ self._ret(self.rng.normal(0, 2 * e), axis)
         self.state = wobble @ np.array(nom, float)          # imperfect, like by hand
+        return None
 
     def set_sample(self, inside):
         self.clock += self.SWAP_S
@@ -290,7 +220,8 @@ class SimRig:
                 "sim_state_error_deg": self.a.sim_state_error_deg,
                 "sim_noise_rel": self.a.sim_noise_rel,
                 "sim_laser_drift_rel": self.a.sim_laser_drift_rel,
-                "sim_laser_noise_rel": self.a.sim_laser_noise_rel}
+                "sim_laser_noise_rel": self.a.sim_laser_noise_rel,
+                "psg": self.psg.describe() if self.psg is not None else None}
 
 
 # --------------------------------------------------------------------------- #
@@ -299,25 +230,8 @@ class SimRig:
 def sweep(rig, a, tag, span_deg=360.0):
     """One QWP sweep of qwp_steps positions over span_deg -> dict with the
     sweep CSV columns. 360 deg also separates beam walk (360-deg period)."""
-    n = int(a.qwp_steps)
-    step = span_deg / n
-    sw = {"commanded_deg": a.qwp_zero_deg + np.arange(n) * step,
-          "measured_deg": np.empty(n), "power_W": np.empty(n),
-          "ref_W": np.empty(n), "t_s": np.empty(n)}
-    rig.move_to(sw["commanded_deg"][0])
-    t_start = rig.now()
-    for k in range(n):
-        if k:
-            rig.move_relative(step)
-        time.sleep(a.qwp_settle)
-        sw["t_s"][k] = rig.now()
-        sw["power_W"][k], sw["ref_W"][k] = rig.read()
-        sw["measured_deg"][k] = rig.position()
-        done = int(30 * (k + 1) / n)
-        print(f"\r  measuring {tag:6s} [{'#' * done}{'.' * (30 - done)}] {k+1}/{n}",
-              end="", flush=True)
-    print(f"   {rig.now() - t_start:.0f} s")
-    return sw
+    return pm_sweep(rig, steps=a.qwp_steps, span_deg=span_deg, zero_deg=a.qwp_zero_deg,
+                    settle_s=a.qwp_settle, tag=tag)
 
 
 def analyse_sweep(sw, a):
@@ -354,6 +268,75 @@ def coverage(S_list):
     sv = np.linalg.svd(S / S[0], compute_uv=False)
     rank = int((sv > 1e-2 * sv[0]).sum())
     return rank, (sv[0] / sv[-1] if len(S_list) >= 4 else float("inf"))
+
+
+def plan_states(psg, specs):
+    """The PSG settings of every state, and whether together they can
+    reconstruct M -- before anything is measured."""
+    print("\nstates (PSG)" + ("" if psg.cal.calibrated else
+                              "  -- NOMINAL model, the PSG is not calibrated"))
+    plans = []
+    for k, spec in enumerate(specs, 1):
+        try:
+            s = psg.solve(spec)
+        except ValueError as e:
+            raise SystemExit(f"states, entry {k}: {e}") from None
+        plans.append(s)
+        print(f"  {k}. {s.label:10s} HWP {s.hwp_deg:7.2f}  QWP {s.qwp_deg:7.2f}   "
+              f"model miss {s.error_deg:.3f} deg")
+    rank, cond = psg_coverage([s.predicted for s in plans]) if len(plans) >= 1 else (0, 0)
+    if rank < 4:
+        raise SystemExit(f"these states cannot reconstruct M (rank {rank} of 4): use at "
+                         f"least 4, including a circular one (R or L)")
+    print(f"  predicted coverage: rank 4, condition number {cond:.2f} (1.73 = best possible)")
+    if not psg.cal.calibrated:
+        print("  NOTE: not calibrated, so the states can be far from their targets. They\n"
+              "  are measured, so M is still right -- but run `poltk psg calibrate` first.")
+    return plans
+
+
+def measure_state(r, a, run, idx):
+    """Sample out -> the input sweep, sample in -> the through-sample sweep.
+    Saves both and prints the live feedback; returns the two fits."""
+    sweeps, fits = {}, {}
+    for side, prompt, tag in (
+            ("in", "REMOVE the sample, then press Enter to measure the input state...",
+             "input"),
+            ("out", "PUT THE SAMPLE BACK, then press Enter to measure through it...",
+             "output")):
+        input(prompt)
+        r.set_sample(side == "out")
+        sw = sweep(r, a, tag, a.qwp_sweep_deg)
+        write_sweep(run / f"state_{idx:02d}_{side}.csv", sw["commanded_deg"],
+                    sw["measured_deg"], sw["power_W"], sw["ref_W"], sw["t_s"])
+        f = analyse_sweep(sw, a)
+        sweeps[side], fits[side] = sw, f
+        name = "S_in " if side == "in" else "S_out"
+        fit_txt = (f"fit rms {100 * f['rms_raw']:.2f}% raw -> "
+                   f"{100 * f['rms_rel']:.2f}% laser-corrected"
+                   if "rms_raw" in f else f"fit rms {100 * f['rms_rel']:.2f}%")
+        print(f"  {name} = {fmt(f['S'])}   {fit_txt}")
+        if has_reference(sw):
+            print(f"          {laser_line(sw)}")
+    if has_reference(sweeps["in"]):
+        change = np.mean(sweeps["out"]["ref_W"]) / np.mean(sweeps["in"]["ref_W"]) - 1
+        print(f"  laser changed {100 * change:+.2f}% between the input and "
+              f"through-sample sweeps (corrected)")
+    return fits
+
+
+def report_coverage(S_in_list):
+    rank, cond = coverage(S_in_list)
+    if rank < 4:
+        hint = ("add a state with a circular component (e.g. R or L)"
+                if len(S_in_list) >= 3 and abs(np.column_stack(S_in_list)[3]).max() < 0.2
+                else "need at least 4 states")
+        print(f"  saved. states {len(S_in_list)} | rank {rank} of 4 -- {hint}")
+    else:
+        verdict = ("good" if cond < 4 else "usable -- spread the states more"
+                   if cond < 10 else "POOR -- states too similar")
+        print(f"  saved. states {len(S_in_list)} | rank 4, condition "
+              f"number {cond:.2f} ({verdict}; 1.73 is the best possible)")
 
 
 def main(argv=None) -> int:
@@ -394,6 +377,11 @@ def main(argv=None) -> int:
                     default=True, dest="zero_meter")
     ap.add_argument("--out", default=None, help="output root (default: Desktop)")
     ap.add_argument("--notes", default="")
+    ap.add_argument("--use-psg", type=str2bool, default=True, dest="use_psg",
+                    help="the PSG sets the states (false: you set them by hand)")
+    ap.add_argument("--states", nargs="+", default=list(SIX_STATES),
+                    help="input states for the PSG: names here; in the JSON also "
+                         "[S1, S2, S3] or {\"azimuth_deg\": .., \"ellipticity_deg\": ..}")
     ap.add_argument("--simulate", action="store_true")
     ap.add_argument("--sim-state-error-deg", type=float, default=3.0,
                     dest="sim_state_error_deg")
@@ -440,65 +428,50 @@ def main(argv=None) -> int:
         save()
 
         S_in_list = []
-        idx = 0
-        while True:
-            idx += 1
-            print(f"\n=== state {idx} ===")
-            label = input("Set the input state by hand, then type a label for it"
-                          "\n  (e.g. H, D, R -- approximate is fine; Enter = finish): ").strip()
-            if not label:
-                rank = coverage(S_in_list)[0] if S_in_list else 0
-                if rank < 4:
-                    ans = input(f"Only rank {rank} of 4 -- the analysis cannot "
-                                f"reconstruct M. Finish anyway? [y/N]: ").strip().lower()
-                    if ans != "y":
-                        idx -= 1
-                        continue
-                break
-            r.set_state(label)
-
-            sweeps, fits = {}, {}
-            for side, prompt, tag in (
-                    ("in", "REMOVE the sample, then press Enter to measure the input state...",
-                     "input"),
-                    ("out", "PUT THE SAMPLE BACK, then press Enter to measure through it...",
-                     "output")):
-                input(prompt)
-                r.set_sample(side == "out")
-                sw = sweep(r, a, tag, a.qwp_sweep_deg)
-                write_sweep(run / f"state_{idx:02d}_{side}.csv", sw["commanded_deg"],
-                            sw["measured_deg"], sw["power_W"], sw["ref_W"], sw["t_s"])
-                f = analyse_sweep(sw, a)
-                sweeps[side], fits[side] = sw, f
-                name = "S_in " if side == "in" else "S_out"
-                fit_txt = (f"fit rms {100 * f['rms_raw']:.2f}% raw -> "
-                           f"{100 * f['rms_rel']:.2f}% laser-corrected"
-                           if "rms_raw" in f else f"fit rms {100 * f['rms_rel']:.2f}%")
-                print(f"  {name} = {fmt(f['S'])}   {fit_txt}")
-                if has_reference(sw):
-                    print(f"          {laser_line(sw)}")
-            if has_reference(sweeps["in"]):
-                change = np.mean(sweeps["out"]["ref_W"]) / np.mean(sweeps["in"]["ref_W"]) - 1
-                print(f"  laser changed {100 * change:+.2f}% between the input and "
-                      f"through-sample sweeps (corrected)")
-
-            meta["states"].append({"index": idx, "label": label,
-                                   "input": f"state_{idx:02d}_in.csv",
-                                   "output": f"state_{idx:02d}_out.csv"})
-            save()
-            S_in_list.append(fits["in"]["S"])
-
-            rank, cond = coverage(S_in_list)
-            if rank < 4:
-                hint = ("add a state with a circular component (e.g. R or L)"
-                        if len(S_in_list) >= 3 and abs(np.column_stack(S_in_list)[3]).max() < 0.2
-                        else "need at least 4 states")
-                print(f"  saved. states {len(S_in_list)} | rank {rank} of 4 -- {hint}")
-            else:
-                verdict = ("good" if cond < 4 else "usable -- spread the states more"
-                           if cond < 10 else "POOR -- states too similar")
-                print(f"  saved. states {len(S_in_list)} | rank 4, condition "
-                      f"number {cond:.2f} ({verdict}; 1.73 is the best possible)")
+        if r.psg is not None:
+            plan_states(r.psg, a.states)
+            for idx, spec in enumerate(a.states, 1):
+                print(f"\n=== state {idx} of {len(a.states)}: {state_label(spec)} ===")
+                setting = r.set_state(spec)
+                print(f"  PSG: HWP {setting.hwp_deg:.2f} deg, QWP {setting.qwp_deg:.2f} deg "
+                      f"(model: {setting.error_deg:.2f} deg from the target)")
+                fits = measure_state(r, a, run, idx)
+                miss = float(sphere_angle_deg(fits["in"]["S"], setting.target))
+                print(f"  measured input is {miss:.2f} deg from the target on the Poincare "
+                      f"sphere" + (" -- recalibrate the PSG? (poltk psg calibrate)"
+                                   if miss > 2.0 and r.psg.cal.calibrated else ""))
+                meta["states"].append({"index": idx, "label": setting.label,
+                                       "input": f"state_{idx:02d}_in.csv",
+                                       "output": f"state_{idx:02d}_out.csv",
+                                       "psg": setting.to_dict(), "input_miss_deg": miss})
+                save()
+                S_in_list.append(fits["in"]["S"])
+                report_coverage(S_in_list)
+        else:
+            idx = 0
+            while True:
+                idx += 1
+                print(f"\n=== state {idx} ===")
+                label = input("Set the input state by hand, then type a label for it"
+                              "\n  (e.g. H, D, R -- approximate is fine; Enter = finish): "
+                              ).strip()
+                if not label:
+                    rank = coverage(S_in_list)[0] if S_in_list else 0
+                    if rank < 4:
+                        ans = input(f"Only rank {rank} of 4 -- the analysis cannot "
+                                    f"reconstruct M. Finish anyway? [y/N]: ").strip().lower()
+                        if ans != "y":
+                            idx -= 1
+                            continue
+                    break
+                r.set_state(label)
+                fits = measure_state(r, a, run, idx)
+                meta["states"].append({"index": idx, "label": label,
+                                       "input": f"state_{idx:02d}_in.csv",
+                                       "output": f"state_{idx:02d}_out.csv"})
+                save()
+                S_in_list.append(fits["in"]["S"])
+                report_coverage(S_in_list)
 
     print(f"\n{len(meta['states'])} states saved in {run}")
     print("Analyse with: python analyze_mueller.py   (set run_dir in analyze_mueller.json)")
@@ -506,4 +479,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except ToolkitError as e:
+        sys.exit(f"error: {e}")

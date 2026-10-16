@@ -662,27 +662,54 @@ def measure(a) -> Path:
             np.savez_compressed(run / "sim_truth.npz", **r.truth())
         r.set_sample(False)
         amb = start(r, a)
-        print("\nNO SAMPLE in the beam for the whole run.\nEXPOSURE: set H (both state "
-              "wave plates OUT), then type an exposure -- the script shows how full the "
-              "brightest pixel gets.")
+        psg = getattr(r, "psg", None)
+        if psg is not None:
+            r.set_state("H")
+            print("\nNO SAMPLE in the beam for the whole run.\nEXPOSURE: the PSG set H, "
+                  "now type an exposure -- the script shows how full the brightest pixel "
+                  "gets.")
+        else:
+            print("\nNO SAMPLE in the beam for the whole run.\nEXPOSURE: set H (both state "
+                  "wave plates OUT), then type an exposure -- the script shows how full the "
+                  "brightest pixel gets.")
         check_exposure(r, a)
         ambient_report(amb, r, a)
         print(f"  exposure for the whole run: {r.exposure_ms:g} ms x {r.hw_average} frames")
         save()
 
-        print("\nSuggested states (approximate is fine -- each is measured):\n"
-              "  H    both state wave plates OUT (polarizer only), max signal -> retardance\n"
-              "  R/L  state QWP in, as circular as is easy               -> zero\n"
-              "  D/A  cross-check of the retardance;  V  analyzer leak\n"
-              "Don't touch anything while a state's repeats run.")
+        if psg is not None:
+            print("\nThe PSG sets each state you type (exact at its calibration wavelength,\n"
+                  "elliptical elsewhere -- still DOP = 1, and every wavelength is weighted\n"
+                  "by how sensitive the state is there):\n"
+                  "  H    -> retardance (the most sensitive state)\n"
+                  "  D/A  -> retardance too, and the cross-check between states\n"
+                  "  R/L  -> zero\n"
+                  "  P    analyzer leak: both PSG plates along the polarizer, the same V at\n"
+                  "       every wavelength (V carries no retardance information)\n"
+                  "Don't touch anything while a state's repeats run.")
+        else:
+            print("\nSuggested states (approximate is fine -- each is measured):\n"
+                  "  H    both state wave plates OUT (polarizer only), max signal -> "
+                  "retardance\n"
+                  "  R/L  state QWP in, as circular as is easy               -> zero\n"
+                  "  D/A  cross-check of the retardance;  V  analyzer leak\n"
+                  "Don't touch anything while a state's repeats run.")
         idx = 0
         while True:
-            label = input(f"\nstate {idx + 1}: set it by hand, then type a label "
-                          f"(Enter = finish): ").strip()
+            label = input(f"\nstate {idx + 1}: " + ("type a state for the PSG"
+                          if psg is not None else "set it by hand, then type a label")
+                          + " (Enter = finish): ").strip()
             if not label:
                 break
+            try:
+                setting = r.set_state(label)
+            except ValueError as e:
+                print(f"  {e}")
+                continue
             idx += 1
-            r.set_state(label)
+            if setting is not None:
+                label = setting.label
+                print(f"  PSG: HWP {setting.hwp_deg:.2f} deg, QWP {setting.qwp_deg:.2f} deg")
             meta["states"].append({"index": idx, "label": label, "sweeps": []})
             for k in range(int(a.repeats)):
                 sw = sweep(r, a, f"{label} {k + 1}/{a.repeats}", span)

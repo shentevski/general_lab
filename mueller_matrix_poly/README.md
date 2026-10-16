@@ -5,10 +5,15 @@ broadband LED (MBB1F1, 470–850 nm) and the signal power meter by a CCT10 spect
 whole spectrum is recorded at every QWP step, so one run gives M(λ), about 480–820 nm.
 
 ```
-LED → collimator → polarizer → beamsplitter → HWP (H V D A) / QWP (R L) → [sample] → QWP (rotating) → analyzer → fibre → CCT10
-                                    │
-                                    └→ reference power meter (optional LED monitor)
+LED → collimator → polarizer (V) → beamsplitter → HWP (DDR25) → QWP (PRM1Z8) → [sample] → QWP (rotating) → analyzer → fibre → CCT10
+                                        │         └──────── PSG ────────┘
+                                        └→ reference power meter (optional LED monitor)
 ```
+
+The input states are set by the PSG, driven by `polarization_toolkit` (`poltk psg`), as
+in the laser version. Its calibration is shared: it is calibrated once with the 520 nm
+laser (`poltk psg calibrate`, see `../mueller_matrix`) and read from `~/.poltk` by
+these scripts too.
 
 | file | what |
 |---|---|
@@ -28,10 +33,10 @@ must sit next to this one. Hardware: `thorlabs_spectrometer` (Windows only), `kc
 
 - The analyzer is fixed, so the light entering the spectrometer always has the same
   polarization. The grating's and the fibre's polarization dependence don't matter.
-- Every input state is measured, not assumed. The HWP and QWP that make the states need
-  no calibration at any wavelength. A 520 nm HWP makes an elliptical "D" at 800 nm, and
-  that's fine. The coverage check after each state tells you whether the states still
-  spread over the sphere at every wavelength.
+- Every input state is measured, not assumed. The PSG's plates are calibrated at 520 nm
+  only, so its states are exact there and elliptical elsewhere: its "D" is elliptical at
+  800 nm, and that's fine. The coverage check after each state tells you whether the
+  states still spread over the sphere at every wavelength.
 - The spectrometer's spectral response cancels, since every number is a ratio at the same
   pixel.
 
@@ -70,15 +75,24 @@ characterization measures it. A diffuser or a large‑core fibre reduces it.
 2. **`full_scale_counts`, once.** 65535 (16‑bit) is assumed. Saturate a pixel and read the
    raw value to check it. The clipping check also detects a flat‑topped spectrum on its
    own.
-3. **Calibrate:** `python QWP_analyzer_characterization_poly.py`. No sample. States:
-   - **H**, with both state wave plates OUT: the polarizer alone gives the same linear
-     state at every wavelength. This gives the retardance.
-   - **R and L**, which give the zero.
-   - Optionally **D and A** (a cross‑check) and **V** (the analyzer leak).
+3. **PSG:** set up and calibrated with the laser, as in `../mueller_matrix` (its
+   steps 1 and 3). The calibration in `~/.poltk` is used here automatically.
+4. **Calibrate the polarimeter:** `python QWP_analyzer_characterization_poly.py`. No
+   sample. You type each state and the PSG sets it:
+   - **H** gives the retardance. It is exact H at 520 nm and elliptical elsewhere,
+     still fully polarized; every wavelength is weighted by how sensitive the state is
+     there.
+   - **R and L** give the zero.
+   - Optionally **D and A** (more retardance, and the cross‑check) and **P** (both PSG
+     plates along the polarizer: the same V at every wavelength, for the analyzer
+     leak). V, R and L carry no retardance information: their DOP stays 1 whatever
+     retardance is assumed.
 
    Paste the printed lines into the JSON files.
-4. **Measure:** `python measure_mueller_poly.py`. Rehearse first with `--simulate`.
-5. **Analyze:** set `run_dir` in `analyze_mueller_poly.json`, then
+5. **Measure:** `python measure_mueller_poly.py`. Rehearse first with `--simulate`.
+   The PSG sets every state in `states`; for each one you take the sample out and put
+   it back when asked.
+6. **Analyze:** set `run_dir` in `analyze_mueller_poly.json`, then
    `python analyze_mueller_poly.py`.
 
 ## The calibration assumes DOP = 1
@@ -116,6 +130,8 @@ calibration from it too):
 | `wl_min_nm`, `wl_max_nm` | band for checks and live feedback |
 | `ref_pm_serial` | reference meter behind the beamsplitter; `null` = none |
 | `block_at_start` | block the LED at the start: zero the reference meter, measure ambient light |
+| `use_psg` | the PSG sets the states (`false`: by hand, typing a label for each) |
+| `states` | the states, in order: names (`"H"` … `"L"`), `[S1, S2, S3]`, or `{"azimuth_deg", "ellipticity_deg"}` — aimed at the PSG's calibration wavelength |
 
 `analyze_mueller_poly.json`:
 

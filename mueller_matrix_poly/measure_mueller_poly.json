@@ -30,6 +30,9 @@
   "ref_power_range_w": null,
   "block_at_start": true,
 
+  "use_psg": true,
+  "states": ["H", "V", "D", "A", "R", "L"],
+
   "out": null,
   "notes": "",
 

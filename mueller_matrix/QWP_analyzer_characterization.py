@@ -588,20 +588,37 @@ def measure(a) -> Path:
         r.set_sample(False)
         save()
 
-        print("\nNO SAMPLE in the beam for the whole run. Suggested states "
-              "(approximate is fine -- each is measured):\n"
-              "  H    state QWP out, HWP turned for maximum signal -> retardance\n"
-              "  R/L  state QWP in, as circular as is easy       -> zero\n"
-              "  D/A  cross-check of the retardance;  V  analyzer leak\n"
-              "Don't touch anything while a state's repeats run.")
+        psg = getattr(r, "psg", None)
+        if psg is not None:
+            print("\nNO SAMPLE in the beam for the whole run. The PSG sets each state you "
+                  "type:\n"
+                  "  H    -> retardance\n"
+                  "  R/L  -> zero\n"
+                  "  D/A  cross-check of the retardance;  V (or P)  analyzer leak\n"
+                  "Don't touch anything while a state's repeats run.")
+        else:
+            print("\nNO SAMPLE in the beam for the whole run. Suggested states "
+                  "(approximate is fine -- each is measured):\n"
+                  "  H    state QWP out, HWP turned for maximum signal -> retardance\n"
+                  "  R/L  state QWP in, as circular as is easy       -> zero\n"
+                  "  D/A  cross-check of the retardance;  V  analyzer leak\n"
+                  "Don't touch anything while a state's repeats run.")
         idx = 0
         while True:
-            label = input(f"\nstate {idx + 1}: set it by hand, then type a label "
-                          f"(Enter = finish): ").strip()
+            label = input(f"\nstate {idx + 1}: " + ("type a state for the PSG"
+                          if psg is not None else "set it by hand, then type a label")
+                          + " (Enter = finish): ").strip()
             if not label:
                 break
+            try:
+                setting = r.set_state(label)
+            except ValueError as e:
+                print(f"  {e}")
+                continue
             idx += 1
-            r.set_state(label)
+            if setting is not None:
+                label = setting.label
+                print(f"  PSG: HWP {setting.hwp_deg:.2f} deg, QWP {setting.qwp_deg:.2f} deg")
             meta["states"].append({"index": idx, "label": label, "sweeps": []})
             for k in range(int(a.repeats)):
                 sw = sweep(r, a_sweep, f"{label} {k + 1}/{a.repeats}", span)
@@ -671,6 +688,8 @@ def main(argv=None) -> int:
     ap.add_argument("--ref-power-range-w", type=float_or_none, default=None,
                     dest="ref_power_range_w")
     ap.add_argument("--zero-meter", type=str2bool, default=True, dest="zero_meter")
+    ap.add_argument("--use-psg", type=str2bool, default=True, dest="use_psg",
+                    help="the PSG sets the states you type (false: you set them by hand)")
     ap.add_argument("--out", default=None, help="output root (default: Desktop)")
     ap.add_argument("--notes", default="")
     ap.add_argument("--simulate", action="store_true")

@@ -12,13 +12,17 @@ aligned with it.
 
 from __future__ import annotations
 
-import csv
 import json
 from pathlib import Path
 
 import numpy as np
 
-from polarization_toolkit.analysis.extract import design_matrix
+# The polarimeter's Stokes extraction, sweep files and laser correction live
+# in the toolkit (shared with `poltk psg calibrate`); re-exported here so
+# every script keeps importing them from mueller_common.
+from polarization_toolkit.analysis.psa import (  # noqa: F401
+    SWEEP_COLUMNS, corrected_power, extract_stokes, full_turn, has_reference,
+    read_sweep, stokes_from_coeffs, write_sweep)
 
 
 # --------------------------------------------------------------------------- #
@@ -54,72 +58,6 @@ def parse_with_config(ap, argv, default_cfg: Path):
     else:
         print(f"config: none found at {path} -- using built-in defaults")
     return ap.parse_args(argv)
-
-
-# --------------------------------------------------------------------------- #
-# Stokes extraction for ANY QWP retardance
-# --------------------------------------------------------------------------- #
-
-
-def full_turn(angles_deg) -> bool:
-    """True when a sweep of evenly spaced positions covers a whole QWP turn.
-    Works on encoder readings that wrap at 360."""
-    a = np.unwrap(np.deg2rad(np.asarray(angles_deg, float)))
-    n = a.size
-    return n > 1 and np.rad2deg(abs(a[-1] - a[0])) * n / (n - 1) >= 359.0
-
-
-def extract_stokes(power, angles_deg, *, qwp_zero_deg, retardance_deg,
-                   s3_sign=1, walk=None):
-    """Least-squares Stokes vector from one QWP sweep.
-
-    The intensity behind a rotating retarder of retardance delta and an
-    analyzer at 0 is linear in five coefficients, and for general delta
-
-        c0 = (S0 + S1 (1+cos d)/2) / 2      c1 = S3 sin d / 2
-        c3 = S2 (1-cos d) / 4               c4 = S1 (1-cos d) / 4
-
-    Inverting that removes the QWP's retardance error EXACTLY instead of
-    assuming a perfect quarter-wave. At delta = 90 deg it reduces to the
-    toolkit's own projection (checked in _self_check).
-
-    walk: also fit the odd harmonics t, 3t, 5t. Polarization only ever
-    produces even ones (0, 2t, 4t), so anything repeating once per turn is
-    not polarization -- beam walk from a wedged or tilted QWP, moving the
-    beam on the detector (it multiplies the signal, so it lands on 1t, 3t
-    and 5t). Only over a full turn, where odd and even harmonics are
-    orthogonal: they then change the residual (and so the error bars), not
-    S. Over 180 deg they cannot be separated and bias S instead. None =
-    automatically when the sweep covers a full turn.
-
-    Returns dict: S (4,), coeffs (5,), walk (0 or 6,), model (K,), residual_rms.
-    """
-    y = np.asarray(power, float)
-    theta = np.deg2rad(np.asarray(angles_deg, float) - qwp_zero_deg)
-    A = design_matrix(theta)
-    if walk is None:
-        walk = full_turn(angles_deg)
-    if walk:
-        A = np.column_stack([A] + [f(k * theta) for k in (1, 3, 5)
-                                   for f in (np.cos, np.sin)])
-    coef = np.linalg.pinv(A) @ y
-    c = coef[:5]
-    model = A @ coef
-    return {"S": stokes_from_coeffs(c, retardance_deg, s3_sign), "coeffs": c,
-            "walk": coef[5:], "model": model,
-            "residual_rms": float(np.sqrt(np.mean((y - model) ** 2)))}
-
-
-def stokes_from_coeffs(c, retardance_deg, s3_sign=1):
-    """Stokes vector from the fitted coefficients c0..c4 of one sweep (the
-    inversion written out in extract_stokes). Separate so that a fit with
-    extra terms, or a scan over the retardance, uses the same maths."""
-    cd, sd = np.cos(np.deg2rad(retardance_deg)), np.sin(np.deg2rad(retardance_deg))
-    S1 = 4 * c[4] / (1 - cd)
-    S2 = 4 * c[3] / (1 - cd)
-    S3 = s3_sign * 2 * c[1] / sd
-    S0 = 2 * c[0] - S1 * (1 + cd) / 2
-    return np.array([S0, S1, S2, S3])
 
 
 # --------------------------------------------------------------------------- #
@@ -184,52 +122,6 @@ def cloude(M):
     return {"eigenvalues": lam, "physical": bool(lam.min() > -1e-3),
             "entropy": entropy, "M_physical": M_phys,
             "filter_change": float(np.abs(M_phys - M).max() / max(M[0, 0], 1e-15))}
-
-
-# --------------------------------------------------------------------------- #
-# sweep files
-# --------------------------------------------------------------------------- #
-
-# ref_W: the reference (laser monitor) meter, read at the same moment as
-# power_W; NaN when no reference meter was used. t_s: seconds since the
-# start of the run, so all sweeps of a run share one time axis.
-SWEEP_COLUMNS = ("commanded_deg", "measured_deg", "power_W", "ref_W", "t_s")
-
-
-def write_sweep(path: Path, commanded, measured, power, ref, t):
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(SWEEP_COLUMNS)
-        for row in zip(commanded, measured, power, ref, t):
-            w.writerow([f"{v:.9g}" for v in row])
-
-
-def read_sweep(path: Path) -> dict:
-    d = np.genfromtxt(path, delimiter=",", names=True)
-    n = np.atleast_1d(d).size
-    return {k: (np.atleast_1d(d[k]).astype(float) if k in d.dtype.names
-                else np.full(n, np.nan))            # older runs: no ref_W
-            for k in SWEEP_COLUMNS}
-
-
-def has_reference(sweep: dict) -> bool:
-    r = sweep["ref_W"]
-    return bool(np.isfinite(r).all() and (r > 0).all())
-
-
-def corrected_power(sweep: dict, ref_level: float | None = None):
-    """Signal power with the laser fluctuations divided out.
-
-    power_W / ref_W removes everything the two meters see in common --
-    laser power drift and noise. Multiplying by ref_level (the run's mean
-    reference power) keeps the result in watts at the average laser power,
-    so every sweep of a run is on the same scale and M00 stays a
-    transmittance. Without a reference the raw power is returned.
-    """
-    if not has_reference(sweep):
-        return sweep["power_W"]
-    level = np.mean(sweep["ref_W"]) if ref_level is None else ref_level
-    return sweep["power_W"] / sweep["ref_W"] * level
 
 
 def waves_to_deg(waves: float) -> float:

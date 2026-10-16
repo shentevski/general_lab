@@ -1,13 +1,33 @@
 # Mueller matrix of a sample
 
 Rotating-QWP polarimeter (QWP on K-Cube 28000005 → fixed analyzer → PM100D + S130VC),
-input states made by hand, a second PM100D as laser monitor. Built on `polarization_toolkit`.
+input states set by the motorized PSG (polarizer → HWP → QWP), a second PM100D as
+laser monitor. Built on `polarization_toolkit`.
 
 ```
-laser → polarizer → beamsplitter → HWP (H V D A) / QWP (R L) → [sample] → QWP (rotating) → analyzer → signal meter
-                         │
-                         └→ reference meter (laser monitor)
+laser → polarizer (V) → beamsplitter → HWP (DDR25) → QWP (PRM1Z8) → [sample] → QWP (rotating) → analyzer → signal meter
+                             │         └──────── PSG ────────┘                 └──────── polarimeter ────────┘
+                             └→ reference meter (laser monitor)
 ```
+
+## Order of work
+
+1. **PSG settings, once.** Run `poltk psg show`: it writes `~/.poltk/psg_settings.json`.
+   Put the HWP and QWP motor serials in it, and set `psa_config` to the full path of
+   this folder's `measure_mueller.json`.
+2. **Calibrate the polarimeter:** `python QWP_analyzer_characterization.py` (no sample;
+   the PSG sets the states you type: H, R, L, D, A, V). Paste the printed values into
+   `measure_mueller.json`.
+3. **Calibrate the PSG:** `poltk psg calibrate` (no sample, ~25 min). It saves
+   `~/.poltk/psg_calibration.json`; every script reads it automatically, and the next
+   calibration replaces it (the old one goes to `~/.poltk/psg_history/`).
+4. **Measure:** `python measure_mueller.py`.
+5. **Analyze:** set `run_dir` in `analyze_mueller.json`, then `python analyze_mueller.py`.
+
+The first time, step 3 runs with the polarimeter values you already have (93.6°,
+0.24 waves) and step 2 with an uncalibrated PSG: both work, because the polarimeter
+calibration only needs fully polarized states, not exact ones. If step 2 changes the
+polarimeter values a lot, run step 3 again (or `poltk psg refit` on its run folder).
 
 | file | what |
 |---|---|
@@ -15,7 +35,7 @@ laser → polarizer → beamsplitter → HWP (H V D A) / QWP (R L) → [sample] 
 | `analyze_mueller.py` + `analyze_mueller.json` | M, decompositions, error bars, figures |
 | `QWP_analyzer_characterization.py` + `.json` | calibrates the polarimeter itself: QWP zero and retardance, beam walk, analyzer leak |
 | `measure_transmission.py` + `.json` | sample transmittance with one power meter, no polarimeter (checks M00) |
-| `mueller_common.py` | Stokes extraction shared by all (one copy of the maths) |
+| `mueller_common.py` | shared helpers; the Stokes extraction itself lives in the toolkit (`polarization_toolkit.analysis.psa`) |
 
 Both scripts read their JSON automatically. A flag on the command line overrides
 the JSON for that run; `--config other.json` uses a different file. A misspelled
@@ -27,15 +47,20 @@ key in the JSON is rejected with the list of valid keys.
 python measure_mueller.py              # rehearse first with: --simulate
 ```
 
-For each input state:
+Before measuring, it prints the PSG settings of every state in `states` and how well
+they will pin down M (the condition number). Then, for each state:
 
-1. set the state by hand, type a label (`H`, `D`, `R`, anything)
+1. the PSG sets the state
 2. **remove the sample** → Enter → the input state is measured
 3. **put the sample back** → Enter → the state is measured through the sample
 
-After each state it prints the rank and condition number of what you have. Press
-Enter with no label to finish. Everything is saved after every state, in
-`Desktop/mueller_<date>_<time>/` (`run.json` + one CSV per sweep).
+After each state it prints how far the measured input is from the target (a check on
+the PSG calibration) and the rank and condition number of what you have so far.
+Everything is saved after every state, in `Desktop/mueller_<date>_<time>/` (`run.json`
+with the PSG angles of every state, plus one CSV per sweep).
+
+`use_psg: false` goes back to setting the states by hand: you type a label for each,
+and Enter with no label finishes.
 
 **Laser monitor.** Set `ref_pm_serial` once and the rest is automatic: at every QWP
 step both meters are read at the same moment, over the same averaging window
@@ -75,6 +100,8 @@ Key settings in `measure_mueller.json`:
 | `ref_pm_serial` | reference meter after the beamsplitter; `null` = no laser monitor |
 | `ref_power_range_w` | reference range, same rules |
 | `zero_meter` | zero the meter(s) at the start — block the laser before the beamsplitter |
+| `use_psg` | the PSG sets the states (`false`: by hand) |
+| `states` | the states, in order: names (`"H"` … `"L"`), `[S1, S2, S3]`, or `{"azimuth_deg": 30, "ellipticity_deg": 10}` |
 
 ## Analyze
 
@@ -126,19 +153,21 @@ times (default 10) without touching anything, over 360° by default.
 
 | state | what it calibrates | how |
 |---|---|---|
-| **H** (state QWP out, HWP for max signal) | QWP retardance | the depth of its sweep is cos²(δ/2); DOP moves 3.5 % per degree |
+| **H** (the PSG sets it; by hand: state QWP out, HWP for max signal) | QWP retardance | the depth of its sweep is cos²(δ/2); DOP moves 3.5 % per degree |
 | **R** or **L** | QWP zero | a zero error ε gives the S3 term a cos 2θ part, c2/c1 = −tan 2ε, independent of retardance and power |
 | D / A (optional) | cross-check | must give the same retardance as H — their disagreement is the real accuracy |
-| V (optional) | analyzer leak | upper bound on 1 / extinction ratio |
+| V or P (optional) | analyzer leak | upper bound on 1 / extinction ratio (V and R/L carry no retardance information: their DOP stays 1 whatever retardance is assumed) |
 
 Also reported: beam walk (the 360°-period term, and first vs second half turn),
 the cos 2θ term that a zero error does not explain, whether the fit residual is noise
 or systematic, and how much light from the polarimeter reaches the reference meter
 (the wire grid reflects the rejected polarization back).
 
-The states only need to be approximate: each is measured. What matters is not
-touching anything during a state's repeats, H close to the analyzer axis (it is
-the most sensitive state), and R/L reasonably circular.
+With the PSG (`use_psg`, read from `measure_mueller.json`) you type a state and the
+PSG sets it; `P` is both PSG plates along the polarizer. The states only need to be
+approximate: each is measured. What matters is not touching anything during a
+state's repeats, H close to the analyzer axis (it is the most sensitive state), and
+R/L reasonably circular.
 
 **Error budget.** Both numbers come with a budget: the scatter of repeats, the
 disagreement between states (the real accuracy test: zero for a polarimeter whose
