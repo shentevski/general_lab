@@ -434,6 +434,22 @@ def analyse(run_dirs, a, out_dir: Path):
           "(re-analysis of old runs):")
     print(f'  "qwp_zero_deg": {z1:.2f},')
     print(f'  "qwp_retardance_waves": {d1 / 360:.4f},')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pol_file = out_dir / "polarimeter_calibration.json"
+    pol_file.write_text(json.dumps({"qwp_zero_deg": round(float(z1), 4),
+                                    "qwp_retardance_waves": round(float(d1) / 360, 6),
+                                    "s3_sign": a.s3_sign}, indent=2) + "\n")
+    try:
+        from polarization_toolkit.psg import load_calibration
+        psg_cal = load_calibration(simulate=a.simulate)
+        psg_run = psg_cal.meta.get("run_dir") if psg_cal.calibrated else None
+    except Exception:
+        psg_run = None
+    if psg_run:
+        print("\nthe PSG was calibrated with the polarimeter values of that time; refit it "
+              "with these (no new measurement):")
+        print(f'  poltk psg refit "{psg_run}" --psa-config "{pol_file}"'
+              + (" --simulate" if a.simulate else ""))
     if np.isfinite(ret.get("total", nan)) and np.isfinite(zero["total"]):
         print("and the tolerances (the totals above) into analyze_mueller.json:")
         print(f'  "retardance_uncertainty_waves": {ret["total"] / 360:.5f},')
@@ -589,7 +605,17 @@ def measure(a) -> Path:
         save()
 
         psg = getattr(r, "psg", None)
-        if psg is not None:
+        auto = list(a.psg_states) if psg is not None else []
+        if auto:
+            n_sw = len(auto) * int(a.repeats)
+            print(f"\nAUTOMATIC: the PSG sets {', '.join(map(str, auto))}, {a.repeats} "
+                  f"sweeps each ({n_sw} sweeps, ~{n_sw * a.qwp_steps * (a.qwp_settle + 0.35) / 60:.0f} "
+                  f"min). The PSG's own accuracy does not matter here -- any fully\n"
+                  f"polarized state works; H gives the retardance, R/L the zero.")
+            if not a.simulate:
+                input("NO SAMPLE in the beam for the whole run. Press Enter when it is out "
+                      "-- then leave everything alone...")
+        elif psg is not None:
             print("\nNO SAMPLE in the beam for the whole run. The PSG sets each state you "
                   "type:\n"
                   "  H    -> retardance\n"
@@ -605,9 +631,15 @@ def measure(a) -> Path:
                   "Don't touch anything while a state's repeats run.")
         idx = 0
         while True:
-            label = input(f"\nstate {idx + 1}: " + ("type a state for the PSG"
-                          if psg is not None else "set it by hand, then type a label")
-                          + " (Enter = finish): ").strip()
+            if auto:
+                label = auto.pop(0)
+                print(f"\nstate {idx + 1}: {label}")
+            elif a.psg_states and psg is not None:
+                break                                   # the automatic list is done
+            else:
+                label = input(f"\nstate {idx + 1}: " + ("type a state for the PSG"
+                              if psg is not None else "set it by hand, then type a label")
+                              + " (Enter = finish): ").strip()
             if not label:
                 break
             try:
@@ -689,7 +721,11 @@ def main(argv=None) -> int:
                     dest="ref_power_range_w")
     ap.add_argument("--zero-meter", type=str2bool, default=True, dest="zero_meter")
     ap.add_argument("--use-psg", type=str2bool, default=True, dest="use_psg",
-                    help="the PSG sets the states you type (false: you set them by hand)")
+                    help="the PSG sets the states (false: you set them by hand)")
+    ap.add_argument("--psg-states", nargs="*", default=["H", "R", "L", "D", "A", "V"],
+                    dest="psg_states",
+                    help="with the PSG: measure these automatically, `repeats` sweeps each "
+                         "(empty: type the states one by one)")
     ap.add_argument("--out", default=None, help="output root (default: Desktop)")
     ap.add_argument("--notes", default="")
     ap.add_argument("--simulate", action="store_true")

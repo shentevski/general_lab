@@ -16,13 +16,16 @@ laser → polarizer (V) → beamsplitter → HWP (DDR25) → QWP (PRM1Z8) → [s
    Put the HWP and QWP motor serials in it, and set `psa_config` to the full path of
    this folder's `measure_mueller.json`.
 2. **Calibrate the polarimeter:** `python QWP_analyzer_characterization.py` (no sample;
-   the PSG sets the states you type: H, R, L, D, A, V). Paste the printed values into
-   `measure_mueller.json`.
+   automatic: the PSG sets `psg_states`, H R L D A V by default, `repeats` sweeps each).
+   Paste the printed values into `measure_mueller.json`. If the PSG is already
+   calibrated, it also prints the `poltk psg refit` command that updates the PSG with the
+   new polarimeter values, without measuring again.
 3. **Calibrate the PSG:** `poltk psg calibrate` (no sample, ~25 min). It saves
    `~/.poltk/psg_calibration.json`; every script reads it automatically, and the next
    calibration replaces it (the old one goes to `~/.poltk/psg_history/`).
-4. **Measure:** `python measure_mueller.py`.
-5. **Analyze:** set `run_dir` in `analyze_mueller.json`, then `python analyze_mueller.py`.
+4. **Check the PSG** (optional): `python psg_check.py`, then type states.
+5. **Measure:** `python measure_mueller.py`.
+6. **Analyze:** set `run_dir` in `analyze_mueller.json`, then `python analyze_mueller.py`.
 
 The first time, step 3 runs with the polarimeter values you already have (93.6°,
 0.24 waves) and step 2 with an uncalibrated PSG: both work, because the polarimeter
@@ -34,6 +37,7 @@ polarimeter values a lot, run step 3 again (or `poltk psg refit` on its run fold
 | `measure_mueller.py` + `measure_mueller.json` | interactive measurement |
 | `analyze_mueller.py` + `analyze_mueller.json` | M, decompositions, error bars, figures |
 | `QWP_analyzer_characterization.py` + `.json` | calibrates the polarimeter itself: QWP zero and retardance, beam walk, analyzer leak |
+| `psg_check.py` + `.json` | type a state: the PSG sets it, the polarimeter measures it; target / expected / measured and the ellipses |
 | `measure_transmission.py` + `.json` | sample transmittance with one power meter, no polarimeter (checks M00) |
 | `mueller_common.py` | shared helpers; the Stokes extraction itself lives in the toolkit (`polarization_toolkit.analysis.psa`) |
 
@@ -163,8 +167,23 @@ the cos 2θ term that a zero error does not explain, whether the fit residual is
 or systematic, and how much light from the polarimeter reaches the reference meter
 (the wire grid reflects the rejected polarization back).
 
-With the PSG (`use_psg`, read from `measure_mueller.json`) you type a state and the
-PSG sets it; `P` is both PSG plates along the polarizer. The states only need to be
+With the PSG (`use_psg`, read from `measure_mueller.json`) it runs on its own: the PSG
+sets every state in `psg_states` (H R L D A V by default) and each is swept `repeats`
+times. With 100 steps per sweep that is about 1 min per sweep, so 6 states × 10 repeats
+is about an hour; lower `repeats` for a quicker run. An empty `psg_states` lets you type
+the states instead (`P` is both PSG plates along the polarizer). The PSG's own accuracy
+does not matter here: any fully polarized state works.
+
+**PSG miss vs polarimeter error.** If `poltk psg calibrate` reports a large miss, the
+measured DOP line tells you where it comes from. A polarimeter error large enough to
+make the PSG miss by several degrees (e.g. a retardance 0.03 waves off) also spreads
+the measured DOP far from 1 (0.73–1.04 in simulation). A DOP close to 1 with a large
+miss points at the PSG side instead. On the bench it was the input state: the polarizer
+sat 20° from the analyzer's V and the beamsplitter added −1° of ellipticity, which a fit
+fixed at V cannot absorb (4.5° rms); with `fit_polarizer: true` in
+`~/.poltk/psg_settings.json` (the default for new files) the fit finds both, 0.6° rms.
+Other suspects: the QWP stage setting, a plate wobbling in its mount, a stage not
+reaching its position. The states only need to be
 approximate: each is measured. What matters is not touching anything during a
 state's repeats, H close to the analyzer axis (it is the most sensitive state), and
 R/L reasonably circular.
@@ -197,6 +216,21 @@ out, in, out, in, …, out (`cycles` times in); each "in" is compared with the m
 the "out" readings just before and after it, so slow laser drift cancels. It prints
 the transmittance per cycle and the mean ± its error, and saves `readings.csv` and
 `run.json` in `Desktop/transmission_<date>_<time>/`.
+
+## Check the PSG
+
+```
+python psg_check.py                  # type states one after the other (Enter quits)
+python psg_check.py R H "30 -10"     # or give them; also "states" in psg_check.json
+```
+
+A state is a name (`H V D A R L P`), two numbers (azimuth and ellipticity of the
+ellipse, deg) or three (S1 S2 S3). For each one it prints the target, the expected
+state (the PSG model at the angles the stages reached) and the measured state, with
+DOP, azimuth and ellipticity, and the misses on the Poincaré sphere: measured vs target
+is the whole error, measured vs expected the part the PSG calibration does not explain.
+The figure overlays the three ellipses. No sample in the beam; everything is saved in
+`Desktop/psg_check_<date>_<time>/`.
 
 ## The calibration trap
 

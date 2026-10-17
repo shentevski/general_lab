@@ -78,7 +78,8 @@ characterization measures it. A diffuser or a large‑core fibre reduces it.
 3. **PSG:** set up and calibrated with the laser, as in `../mueller_matrix` (its
    steps 1 and 3). The calibration in `~/.poltk` is used here automatically.
 4. **Calibrate the polarimeter:** `python QWP_analyzer_characterization_poly.py`. No
-   sample. You type each state and the PSG sets it:
+   sample. After the exposure it runs on its own: the PSG sets every state in
+   `psg_states` (H R L D A P by default; empty = type them):
    - **H** gives the retardance. It is exact H at 520 nm and elliptical elsewhere,
      still fully polarized; every wavelength is weighted by how sensitive the state is
      there.

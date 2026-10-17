@@ -677,7 +677,14 @@ def measure(a) -> Path:
         print(f"  exposure for the whole run: {r.exposure_ms:g} ms x {r.hw_average} frames")
         save()
 
-        if psg is not None:
+        auto = list(a.psg_states) if psg is not None else []
+        if auto:
+            print(f"\nAUTOMATIC: the PSG sets {', '.join(map(str, auto))}, {a.repeats} sweeps "
+                  f"each. Its states are exact at its calibration wavelength and elliptical\n"
+                  f"elsewhere -- still DOP = 1, and every wavelength is weighted by how\n"
+                  f"sensitive the state is there. H gives the retardance, R/L the zero, P the\n"
+                  f"analyzer leak. Leave everything alone until it finishes.")
+        elif psg is not None:
             print("\nThe PSG sets each state you type (exact at its calibration wavelength,\n"
                   "elliptical elsewhere -- still DOP = 1, and every wavelength is weighted\n"
                   "by how sensitive the state is there):\n"
@@ -696,9 +703,15 @@ def measure(a) -> Path:
                   "Don't touch anything while a state's repeats run.")
         idx = 0
         while True:
-            label = input(f"\nstate {idx + 1}: " + ("type a state for the PSG"
-                          if psg is not None else "set it by hand, then type a label")
-                          + " (Enter = finish): ").strip()
+            if auto:
+                label = auto.pop(0)
+                print(f"\nstate {idx + 1}: {label}")
+            elif a.psg_states and psg is not None:
+                break                                   # the automatic list is done
+            else:
+                label = input(f"\nstate {idx + 1}: " + ("type a state for the PSG"
+                              if psg is not None else "set it by hand, then type a label")
+                              + " (Enter = finish): ").strip()
             if not label:
                 break
             try:
@@ -737,6 +750,10 @@ def main(argv=None) -> int:
     ap.add_argument("run_dirs", nargs="*", default=[],
                     help="analyse these runs instead of measuring (characterization "
                          "or spectral Mueller runs)")
+    ap.add_argument("--psg-states", nargs="*", default=["H", "R", "L", "D", "A", "P"],
+                    dest="psg_states",
+                    help="with the PSG: measure these automatically, `repeats` sweeps each "
+                         "(empty: type the states one by one)")
     ap.add_argument("--repeats", type=int, default=5,
                     help="sweeps per state, nothing touched in between")
     ap.add_argument("--bin-nm", type=float, default=10.0, dest="bin_nm",

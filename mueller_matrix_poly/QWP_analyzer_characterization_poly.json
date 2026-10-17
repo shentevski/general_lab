@@ -1,6 +1,7 @@
 {
   "run_dirs": [],
 
+  "psg_states": ["H", "R", "L", "D", "A", "P"],
   "repeats": 5,
   "qwp_sweep_deg": 360,
 
