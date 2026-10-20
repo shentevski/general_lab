@@ -24,7 +24,8 @@ laser → polarizer (V) → beamsplitter → HWP (DDR25) → QWP (PRM1Z8) → [s
    `~/.poltk/psg_calibration.json`; every script reads it automatically, and the next
    calibration replaces it (the old one goes to `~/.poltk/psg_history/`).
 4. **Check the PSG** (optional): `python psg_check.py`, then type states.
-5. **Measure:** `python measure_mueller.py`.
+5. **Measure:** `python measure_mueller.py`. With the PSG and the flippers it is fully
+   automatic (see *Film and substrate* below).
 6. **Analyze:** set `run_dir` in `analyze_mueller.json`, then `python analyze_mueller.py`.
 
 The first time, step 3 runs with the polarimeter values you already have (93.6°,
@@ -106,6 +107,60 @@ Key settings in `measure_mueller.json`:
 | `zero_meter` | zero the meter(s) at the start — block the laser before the beamsplitter |
 | `use_psg` | the PSG sets the states (`false`: by hand) |
 | `states` | the states, in order: names (`"H"` … `"L"`), `[S1, S2, S3]`, or `{"azimuth_deg": 30, "ellipticity_deg": 10}` |
+| `use_flippers` | the two flippers choose the film / substrate half: fully automatic (`false`: you move the sample) |
+| `film_flipper`, `substrate_flipper` | serials of the flippers that block the film half and the substrate half (MFF, start with 37) |
+| `flipper_block_position` | the flipper position, 1 or 2, that puts the block INTO the beam |
+| `empty_at_end` | at the end, remove film + substrate once; every state is measured again through each empty aperture |
+| `dark_readings` | readings averaged for the dark check at the end |
+
+## Film and substrate (flippers)
+
+The sample is half film, half bare substrate, in one beam; two motorized flippers
+(MFF10x, driven through `thorlabs_motion`'s `flipper.py`) each block one half. A run
+then needs nothing from you:
+
+1. **Start:** both halves blocked, so the signal meter is zeroed. That also removes
+   room light and the meter's dark offset (room light otherwise lowers every DOP and
+   looks like depolarization).
+2. **Each state:** the PSG sets it. Film half blocked: the *reference* sweep, through
+   the substrate. Substrate half blocked: the *sample* sweep, through film + substrate.
+3. **Empty apertures** (`empty_at_end`, on by default): it asks you once to remove the
+   film and the substrate, leaving the two apertures; then every state is measured again
+   through each empty aperture. This is the only thing you do by hand.
+4. **End:** both blocked again; the dark reading should be about 0. If it isn't, the
+   room light or the zero changed during the run, and it says by how much. Then both
+   flippers open, so the beam is clear for the other scripts.
+
+With the empty apertures, `analyze_mueller.py` reports (`result` in its JSON; null =
+`film`):
+
+| `result` | from | meaning |
+|---|---|---|
+| `film` | (film half ÷ its empty aperture) · (substrate half ÷ its empty aperture)⁻¹ | the film alone; each half referenced to its own aperture, so differences between the halves cancel, and M00 is the film's transmittance |
+| `substrate` | substrate half ÷ its empty aperture | the substrate alone |
+| `film_substrate` | film half ÷ its empty aperture | film and substrate together |
+| `relative` | film half ÷ substrate half | the film relative to the substrate (all there is without the empty pass) |
+| `null` | empty film aperture ÷ empty substrate aperture | should be the identity; M00 = how the beam is split between the apertures |
+
+It prints all of them briefly and fully analyzes the one chosen; `results.json` keeps all.
+
+Without the empty pass, the result is the film relative to the substrate,
+M = M_(film+substrate) · M_substrate⁻¹:
+
+- **Exact when the light crosses the substrate before the film**, i.e. the film faces
+  the polarimeter, even for a birefringent substrate. The other way round it holds for
+  an isotropic substrate (glass) and is otherwise the film seen through the substrate.
+- **M00** is the film half's power over the substrate half's: the film's transmittance
+  times however unevenly the beam is split between the halves. The normalized M does
+  not depend on that.
+- **The two halves are different parts of the beam** and reach the polarimeter at
+  slightly different places. The empty pass measures that (`null`) and the `film`
+  result removes it.
+
+Setup, once: `python flipper.py` in `thorlabs_motion` lists the flippers and their
+serials. Check which position blocks (`flipper_block_position`). If `thorlabs_motion`
+was installed before the flipper support, reinstall it (`pip install -e .` in that
+folder) so `flipper` can be imported.
 
 ## Analyze
 

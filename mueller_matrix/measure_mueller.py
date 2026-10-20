@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the Mueller matrix of a sample, one hand-made input state at a time.
+"""Measure the Mueller matrix of a sample -- fully automatic with the PSG and flippers.
 
     python measure_mueller.py                  # reads measure_mueller.json
     python measure_mueller.py --simulate       # rehearse, no hardware
@@ -24,6 +24,33 @@ With use_psg false you set each state by hand and type a label for it
 instead, as many as you like (Enter with no label finishes). Either way it
 reports after every state how well the states so far pin down M (rank and
 condition number).
+
+Flippers (use_flippers): the sample is half film, half bare substrate, in
+one beam, and two motorized flippers (MFF10x) each block one half. Then
+nothing is done by hand:
+
+    start       both halves blocked -> the signal meter is zeroed (this also
+                removes room light and the meter's dark offset)
+    each state  the PSG sets it; film half blocked -> the REFERENCE sweep
+                (through the substrate); substrate half blocked -> the SAMPLE
+                sweep (through film + substrate)
+    empty       (empty_at_end) you remove the film and the substrate, once;
+                every state is measured again through each EMPTY aperture
+    end         both blocked -> a dark reading checks the zero did not
+                drift; then both open
+
+With the empty apertures the analysis references each half to its own
+empty aperture -- M_film = (film half / its empty) . (substrate half / its
+empty)^-1 -- so differences between the two halves of the beam cancel and
+M00 is the film's own transmittance; the two empty apertures against each
+other are a null test (should be the identity). Without them,
+M = S_sample . pinv(S_reference) is the film relative to the substrate,
+M_film = M_(film+substrate) . M_substrate^-1. It is exact when the light
+crosses the substrate BEFORE the film (film facing the polarimeter), even for
+a birefringent substrate; the other way round it holds for an isotropic
+substrate (glass). M00 is the film half's power over the substrate half's:
+the film's transmittance times however unevenly the beam is split between
+the halves -- the normalized M does not depend on that.
 
 The states do NOT need to be exact. Each one is measured, not assumed, so an
 approximate H or R is as good as a perfect one (the PSG's calibration makes
@@ -77,39 +104,135 @@ def str2bool(v):
     return str(v).lower() in ("1", "true", "yes", "y", "on")
 
 
+PLACEHOLDER = "37XXXXXX"
+
+# which halves of the beam are BLOCKED for each view of the sample
+VIEWS = {"reference": ("film",),            # through the substrate only
+         "sample": ("substrate",),          # through film + substrate only
+         "dark": ("film", "substrate"),     # no laser light at the polarimeter
+         "open": ()}
+
+
+def view_of(x):
+    """set_sample accepts a view name, or True / False (sample in / out) as
+    the other scripts pass it."""
+    if isinstance(x, bool):
+        return "sample" if x else "reference"
+    if x not in VIEWS:
+        raise ValueError(f"unknown sample view {x!r}: {sorted(VIEWS)}")
+    return x
+
+
+def flippers_configured(a) -> bool:
+    return bool(getattr(a, "use_flippers", False))
+
+
+class Flippers:
+    """The two MFF10x flippers in front of the half film / half substrate
+    sample: film_flipper blocks the film half, substrate_flipper the
+    substrate half. flipper_block_position is the position (1 or 2) that
+    puts the block INTO the beam."""
+
+    def __init__(self, a):
+        self.serials = {"film": str(a.film_flipper), "substrate": str(a.substrate_flipper)}
+        self.block = int(a.flipper_block_position)
+        if self.block not in (1, 2):
+            raise ValueError("flipper_block_position must be 1 or 2")
+        self.settle = float(a.flipper_settle)
+        self.dev = {}
+        self.view = None
+
+    def __enter__(self):
+        for half, serial in self.serials.items():
+            if serial in ("", "None", PLACEHOLDER):
+                raise ToolkitError(f"no serial for the {half} flipper -- set {half}_flipper "
+                                   f"in measure_mueller.json (MFF serials start with 37), "
+                                   f"or use_flippers: false")
+        from flipper import FilterFlipper
+        try:
+            for half, serial in self.serials.items():
+                self.dev[half] = FilterFlipper(serial).connect()
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        print(f"flippers        : film {self.serials['film']}, substrate "
+              f"{self.serials['substrate']} (block = position {self.block})")
+        self.select("open")
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if len(self.dev) == 2:
+                self.select("open")          # leave the beam clear for other scripts
+        except Exception:
+            pass
+        for d in self.dev.values():
+            try:
+                d.close()
+            except Exception:
+                pass
+        self.dev = {}
+        return False
+
+    def select(self, view):
+        view = view_of(view)
+        for half, d in self.dev.items():
+            d.move_to_position(self.block if half in VIEWS[view] else 3 - self.block)
+        time.sleep(self.settle)
+        self.view = view
+
+    def describe(self):
+        return {"film_flipper": self.serials["film"],
+                "substrate_flipper": self.serials["substrate"],
+                "block_position": self.block}
+
+
 class Rig(PowerMeterPolarimeter):
     """The polarimeter (QWP stage + signal / reference PM100D, from the
-    toolkit) and -- with use_psg -- the PSG, which sets the input states.
-    Without the PSG, set_state is a no-op: you set the states by hand.
-    set_sample is a no-op: you move the sample."""
+    toolkit), with use_psg the PSG, which sets the input states, and with
+    use_flippers the two flippers, which choose the sample half. Without the
+    PSG you set the states by hand; without the flippers you move the sample."""
 
     def __init__(self, a):
         super().__init__(PSAConfig.from_mapping(a))
         self.psg = PSG.from_files() if getattr(a, "use_psg", False) else None
+        self.flippers = Flippers(a) if flippers_configured(a) else None
 
     def __enter__(self):
         super().__enter__()
-        if self.psg is not None:
-            try:
-                self.psg.__enter__()
-            except BaseException:
-                super().__exit__(None, None, None)
-                raise
+        try:
+            for part in (self.psg, self.flippers):
+                if part is not None:
+                    part.__enter__()
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def __exit__(self, *exc):
-        if self.psg is not None:
-            self.psg.__exit__(*exc)
+        for part in (self.flippers, self.psg):
+            if part is not None:
+                try:
+                    part.__exit__(*exc)
+                except Exception:
+                    pass
         return super().__exit__(*exc)
 
     def set_state(self, spec):
         return self.psg.set_state(spec) if self.psg is not None else None
 
-    def set_sample(self, inside):
-        pass
+    def set_sample(self, view):
+        if self.flippers is not None:
+            self.flippers.select(view)
+
+    def zero_signal(self):
+        """Zero the signal meter only (the reference sees the laser before the
+        flippers, so it cannot be darkened by them)."""
+        self.pm.zero()
 
     def describe(self):
-        return {**super().describe(), "psg": self.psg.describe() if self.psg else None}
+        return {**super().describe(), "psg": self.psg.describe() if self.psg else None,
+                "flippers": self.flippers.describe() if self.flippers else None}
 
 
 class SimRig:
@@ -128,6 +251,7 @@ class SimRig:
     simulated = True
     READ_S = 0.3             # one meter reading
     PSG_S = 5.0              # the PSG stages moving
+    FLIP_S = 1.0             # a flipper flipping
     SWAP_S = 20.0            # you taking the sample out / putting it back
     STATE_S = 60.0           # you setting a new state
     DRIFT_PERIOD_S = 900.0
@@ -160,6 +284,20 @@ class SimRig:
         self.parallel = True
         self.psg = (SimulatedPSG.from_files(simulate=True)
                     if getattr(a, "use_psg", False) else None)
+        # flippers: a half film / half substrate sample. The substrate is a
+        # weakly birefringent plate; the film is the sample above; the beam
+        # is split unevenly between the halves; room light reaches the meter
+        self.flippers = flippers_configured(a)
+        self.removed = False                     # film + substrate taken out
+        self.view = "open"
+        self.substrate = 0.92 * retarder_mueller(d(3.0), d(10))
+        self.split = {"reference": 0.52, "sample": 0.48}
+        self.ambient = getattr(a, "sim_ambient_rel", 0.0) * self.P0
+        self.zero = 0.0
+        if self.flippers:
+            # what the analysis should find: the film relative to the substrate,
+            # scaled by the uneven split
+            self.sample_rel = self.split["sample"] / self.split["reference"] * self.sample
 
     def __enter__(self):
         if self.psg is not None:
@@ -191,9 +329,20 @@ class SimRig:
         self.state = wobble @ np.array(nom, float)          # imperfect, like by hand
         return None
 
-    def set_sample(self, inside):
-        self.clock += self.SWAP_S
-        self.inside = bool(inside)
+    def set_sample(self, view):
+        if self.flippers:
+            self.clock += self.FLIP_S
+            self.view = view_of(view)
+        else:
+            self.clock += self.SWAP_S
+            self.inside = bool(view) if isinstance(view, bool) else view == "sample"
+
+    def zero_signal(self):
+        self.zero = self.ambient if self.view == "dark" else self.zero
+
+    def remove_sample(self):
+        self.clock += 60.0
+        self.removed = True
 
     def now(self):                 return self.clock
     def move_to(self, deg):        self.pos = float(deg)
@@ -206,16 +355,32 @@ class SimRig:
         laser = self.P0 * (1 + self.a.sim_laser_drift_rel
                            * np.sin(2 * np.pi * self.clock / self.DRIFT_PERIOD_S + 0.7))
         laser *= 1 + self.rng.normal(0, self.a.sim_laser_noise_rel)   # both meters see it
-        S = (self.sample @ self.state) if self.inside else self.state
+        if self.flippers:
+            Sin = self.state if self.removed else self.substrate @ self.state
+            film = Sin if self.removed else self.sample @ Sin
+            S = {"reference": self.split["reference"] * Sin,
+                 "sample": self.split["sample"] * film,
+                 "dark": 0.0 * Sin,
+                 "open": self.split["reference"] * Sin
+                 + self.split["sample"] * film}[self.view]
+        else:
+            S = (self.sample @ self.state) if self.inside else self.state
         row = self._row(np.deg2rad(self.pos - self.a.qwp_zero_deg), 0.0,
                         np.deg2rad(waves_to_deg(self.a.qwp_retardance_waves)))
         sig = laser * float(row @ S) * (1 + self.rng.normal(0, self.a.sim_noise_rel))
+        if self.flippers:
+            sig += self.ambient - self.zero          # room light, minus the meter's zero
         ref = (0.5 * laser * (1 + self.rng.normal(0, self.a.sim_noise_rel))
                if self.has_ref else float("nan"))
         return sig, ref
 
     def describe(self):
-        return {"backend": "simulated", "true_sample_mueller": self.sample.tolist(),
+        truth = self.sample_rel if self.flippers else self.sample
+        return {"backend": "simulated", "true_sample_mueller": truth.tolist(),
+                "film_mueller": self.sample.tolist(),
+                "flippers": ({"substrate_mueller": self.substrate.tolist(),
+                              "beam_split": self.split, "ambient_W": self.ambient}
+                             if self.flippers else None),
                 "reference_read": "parallel" if self.has_ref else None,
                 "sim_state_error_deg": self.a.sim_state_error_deg,
                 "sim_noise_rel": self.a.sim_noise_rel,
@@ -295,31 +460,40 @@ def plan_states(psg, specs):
     return plans
 
 
-def measure_state(r, a, run, idx):
-    """Sample out -> the input sweep, sample in -> the through-sample sweep.
-    Saves both and prints the live feedback; returns the two fits."""
+def measure_state(r, a, run, idx, auto=False, empty=False):
+    """The input (reference) sweep, then the through-sample sweep. With the
+    flippers (auto) they choose the substrate / film half; otherwise you take
+    the sample out and put it back. Saves both and prints the live feedback;
+    returns the two fits."""
     sweeps, fits = {}, {}
-    for side, prompt, tag in (
-            ("in", "REMOVE the sample, then press Enter to measure the input state...",
-             "input"),
-            ("out", "PUT THE SAMPLE BACK, then press Enter to measure through it...",
-             "output")):
-        input(prompt)
-        r.set_sample(side == "out")
+    steps = ((("in0", "reference", "empty"), ("out0", "sample", "empty")) if empty else
+             (("in", "reference", "substr"), ("out", "sample", "film")) if auto else
+             (("in", "REMOVE the sample, then press Enter to measure the input state...",
+               "input"),
+              ("out", "PUT THE SAMPLE BACK, then press Enter to measure through it...",
+               "output")))
+    for side, what, tag in steps:
+        if auto:
+            r.set_sample(what)
+        else:
+            input(what)
+            r.set_sample(side == "out")
         sw = sweep(r, a, tag, a.qwp_sweep_deg)
         write_sweep(run / f"state_{idx:02d}_{side}.csv", sw["commanded_deg"],
                     sw["measured_deg"], sw["power_W"], sw["ref_W"], sw["t_s"])
         f = analyse_sweep(sw, a)
         sweeps[side], fits[side] = sw, f
-        name = "S_in " if side == "in" else "S_out"
+        name = {"in": "S_ref" if auto else "S_in ", "out": "S_out",
+                "in0": "S_e,s", "out0": "S_e,f"}[side]
         fit_txt = (f"fit rms {100 * f['rms_raw']:.2f}% raw -> "
                    f"{100 * f['rms_rel']:.2f}% laser-corrected"
                    if "rms_raw" in f else f"fit rms {100 * f['rms_rel']:.2f}%")
         print(f"  {name} = {fmt(f['S'])}   {fit_txt}")
         if has_reference(sw):
             print(f"          {laser_line(sw)}")
-    if has_reference(sweeps["in"]):
-        change = np.mean(sweeps["out"]["ref_W"]) / np.mean(sweeps["in"]["ref_W"]) - 1
+    a_, b_ = ("in0", "out0") if empty else ("in", "out")
+    if has_reference(sweeps[a_]) and not empty:
+        change = np.mean(sweeps[b_]["ref_W"]) / np.mean(sweeps[a_]["ref_W"]) - 1
         print(f"  laser changed {100 * change:+.2f}% between the input and "
               f"through-sample sweeps (corrected)")
     return fits
@@ -379,6 +553,22 @@ def main(argv=None) -> int:
     ap.add_argument("--notes", default="")
     ap.add_argument("--use-psg", type=str2bool, default=True, dest="use_psg",
                     help="the PSG sets the states (false: you set them by hand)")
+    ap.add_argument("--use-flippers", type=str2bool, default=False, dest="use_flippers",
+                    help="two flippers choose the film / substrate half of the sample "
+                         "(fully automatic run)")
+    ap.add_argument("--film-flipper", default=PLACEHOLDER, dest="film_flipper",
+                    help="serial of the flipper that blocks the FILM half")
+    ap.add_argument("--substrate-flipper", default=PLACEHOLDER, dest="substrate_flipper",
+                    help="serial of the flipper that blocks the SUBSTRATE half")
+    ap.add_argument("--flipper-block-position", type=int, default=1, choices=(1, 2),
+                    dest="flipper_block_position",
+                    help="flipper position that puts the block INTO the beam")
+    ap.add_argument("--flipper-settle", type=float, default=0.5, dest="flipper_settle")
+    ap.add_argument("--empty-at-end", type=str2bool, default=True, dest="empty_at_end",
+                    help="flippers: at the end you remove film + substrate, and every state "
+                         "is measured again through each empty aperture")
+    ap.add_argument("--dark-readings", type=int, default=5, dest="dark_readings",
+                    help="flippers: readings averaged for the dark check at the end")
     ap.add_argument("--states", nargs="+", default=list(SIX_STATES),
                     help="input states for the PSG: names here; in the JSON also "
                          "[S1, S2, S3] or {\"azimuth_deg\": .., \"ellipticity_deg\": ..}")
@@ -391,6 +581,8 @@ def main(argv=None) -> int:
                     dest="sim_laser_drift_rel", help="laser drift amplitude (relative)")
     ap.add_argument("--sim-laser-noise-rel", type=float, default=0.003,
                     dest="sim_laser_noise_rel", help="laser noise (relative)")
+    ap.add_argument("--sim-ambient-rel", type=float, default=0.01, dest="sim_ambient_rel",
+                    help="flippers: room light at the signal meter (relative)")
     a = parse_with_config(ap, argv, HERE / "measure_mueller.json")
 
     delta = waves_to_deg(a.qwp_retardance_waves)
@@ -412,6 +604,13 @@ def main(argv=None) -> int:
                             "s3_sign": a.s3_sign, "analyzer_deg": 0.0,
                             "wavelength_nm": a.wavelength_nm},
             "qwp_sweep_deg": a.qwp_sweep_deg, "notes": a.notes, "states": []}
+    auto = flippers_configured(a)
+    if auto:
+        meta["sample_mode"] = {
+            "kind": "flippers", "reference": "substrate half (film half blocked)",
+            "sample": "film half (substrate half blocked)",
+            "result": "M = M_(film+substrate) . M_substrate^-1, the film relative to the "
+                      "substrate; M00 includes the beam's split between the halves"}
 
     rig = SimRig(a) if a.simulate else Rig(a)
     with rig as r:
@@ -419,7 +618,12 @@ def main(argv=None) -> int:
             meta["hardware"] = r.describe()
             (run / "run.json").write_text(json.dumps(meta, indent=2, default=str))
 
-        if a.zero_meter:
+        if a.zero_meter and auto:
+            r.set_sample("dark")
+            r.zero_signal()
+            print("\nboth halves blocked: signal meter zeroed (room light and dark "
+                  "offset removed)")
+        elif a.zero_meter:
             what = ("both power meters (block the laser BEFORE the beamsplitter)"
                     if r.has_ref else "the power meter")
             input(f"\nBLOCK the beam to zero {what}, then press Enter...")
@@ -435,11 +639,16 @@ def main(argv=None) -> int:
                 setting = r.set_state(spec)
                 print(f"  PSG: HWP {setting.hwp_deg:.2f} deg, QWP {setting.qwp_deg:.2f} deg "
                       f"(model: {setting.error_deg:.2f} deg from the target)")
-                fits = measure_state(r, a, run, idx)
+                fits = measure_state(r, a, run, idx, auto)
                 miss = float(sphere_angle_deg(fits["in"]["S"], setting.target))
-                print(f"  measured input is {miss:.2f} deg from the target on the Poincare "
-                      f"sphere" + (" -- recalibrate the PSG? (poltk psg calibrate)"
-                                   if miss > 2.0 and r.psg.cal.calibrated else ""))
+                if auto:
+                    print(f"  through the substrate the state is {miss:.2f} deg from the "
+                          f"target (the substrate's own effect included)")
+                else:
+                    print(f"  measured input is {miss:.2f} deg from the target on the "
+                          f"Poincare sphere" + (" -- recalibrate the PSG? (poltk psg "
+                                                 "calibrate)" if miss > 2.0
+                                                 and r.psg.cal.calibrated else ""))
                 meta["states"].append({"index": idx, "label": setting.label,
                                        "input": f"state_{idx:02d}_in.csv",
                                        "output": f"state_{idx:02d}_out.csv",
@@ -465,13 +674,52 @@ def main(argv=None) -> int:
                             continue
                     break
                 r.set_state(label)
-                fits = measure_state(r, a, run, idx)
+                fits = measure_state(r, a, run, idx, auto)
                 meta["states"].append({"index": idx, "label": label,
                                        "input": f"state_{idx:02d}_in.csv",
                                        "output": f"state_{idx:02d}_out.csv"})
                 save()
                 S_in_list.append(fits["in"]["S"])
                 report_coverage(S_in_list)
+
+        if auto and a.empty_at_end and r.psg is not None and meta["states"]:
+            print("\n=== EMPTY APERTURES ===")
+            if a.simulate:
+                r.remove_sample()
+            else:
+                input("REMOVE the film and the substrate (leave the apertures), then press "
+                      "Enter -- the rest is automatic...")
+            if a.zero_meter:
+                r.set_sample("dark")
+                r.zero_signal()
+            for entry, spec in zip(meta["states"], a.states):
+                idx = entry["index"]
+                print(f"\n--- empty, state {idx} of {len(meta['states'])}: {entry['label']} ---")
+                r.set_state(spec)
+                fits = measure_state(r, a, run, idx, auto, empty=True)
+                null = float(sphere_angle_deg(fits["in0"]["S"], fits["out0"]["S"]))
+                ratio = fits["out0"]["S"][0] / fits["in0"]["S"][0]
+                print(f"  the two empty apertures differ by {null:.2f} deg on the Poincare "
+                      f"sphere; power film/substrate aperture {ratio:.3f}")
+                entry.update(input_empty=f"state_{idx:02d}_in0.csv",
+                             output_empty=f"state_{idx:02d}_out0.csv",
+                             empty_null_deg=null)
+                save()
+            meta["sample_mode"]["empty"] = ("each state measured again through the empty "
+                                            "apertures (in0: substrate's, out0: film's)")
+            save()
+
+        if auto and meta["states"]:
+            r.set_sample("dark")
+            dark = np.mean([r.read()[0] for _ in range(max(1, a.dark_readings))])
+            level = np.mean([S[0] for S in S_in_list]) / 2      # ~ mean signal
+            meta["dark_end_W"] = float(dark)
+            print(f"\ndark at the end (both halves blocked): {dark * 1e9:+.1f} nW = "
+                  f"{100 * dark / level:+.2f}% of the signal"
+                  + ("  -- the zero drifted (room light changed?): DOP and M00 are off "
+                     "by about that much" if abs(dark) > 0.005 * level else "  (ok)"))
+            r.set_sample("open")
+            save()
 
     print(f"\n{len(meta['states'])} states saved in {run}")
     print("Analyse with: python analyze_mueller.py   (set run_dir in analyze_mueller.json)")

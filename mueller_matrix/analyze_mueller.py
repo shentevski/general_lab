@@ -9,6 +9,9 @@ What it does
      with the PSA calibration recorded by the measurement -- or the one you
      put in the JSON (e.g. the QWP retardance from the manufacturer).
   2. M = S_out . pinv(S_in), least squares over all the states you took.
+     With the flippers' empty-aperture sweeps, `result` picks what is
+     reported: film (default), relative, substrate, film_substrate, or the
+     null test of the two empty apertures.
   3. Checks: how well the states cover the sphere (condition number),
      whether M predicts every S_out (per-state misfit -- catches a state
      that changed or a sample that moved), and whether M is physical
@@ -154,6 +157,44 @@ def wrap_diff(a, b, period=None):
 # --------------------------------------------------------------------------- #
 
 
+# The sweeps of a state: "in" -> "out" is input -> through sample (with the
+# flippers: substrate half -> film half); "in0" / "out0" are the same two
+# apertures EMPTY (film and substrate removed), measured at the end.
+SIDES = ("in", "out", "in0", "out0")
+FILES = {"in": "input", "out": "output", "in0": "input_empty", "out0": "output_empty"}
+
+# what can be reported, the (input, output) pairs each is built from, and
+# what it means
+RESULTS = {
+    "relative": ([("in", "out")],
+                 "M = S_out . pinv(S_in): the sample (with the flippers: the film "
+                 "relative to the substrate)"),
+    "film": ([("out0", "out"), ("in0", "in")],
+             "M_film = M_(film+substrate) . M_substrate^-1, each half referenced to its own "
+             "empty aperture: differences between the halves cancel, M00 is the film's "
+             "transmittance"),
+    "substrate": ([("in0", "in")], "the substrate alone (substrate half vs its empty aperture)"),
+    "film_substrate": ([("out0", "out")],
+                       "film + substrate together (film half vs its empty aperture)"),
+    "null": ([("in0", "out0")],
+             "null test: the two EMPTY apertures against each other -- should be the identity; "
+             "M00 = how the beam is split between them"),
+}
+
+
+def mueller_for(result, S):
+    """The Mueller matrix of `result` from the Stokes arrays S[side] (4, n)."""
+    if result == "film":
+        return estimate(S["out0"], S["out"]) @ np.linalg.inv(estimate(S["in0"], S["in"]))
+    (a, b), = RESULTS[result][0]
+    return estimate(S[a], S[b])
+
+
+def available_results(sides):
+    return [r for r, (pairs, _) in RESULTS.items()
+            if all(x in sides for pair in pairs for x in pair)]
+
+
 def load(run_dir: Path, exclude):
     meta = json.loads((run_dir / "run.json").read_text())
     states = []
@@ -161,9 +202,14 @@ def load(run_dir: Path, exclude):
         if str(s["index"]) in exclude or s["label"] in exclude:
             print(f"  excluding state {s['index']} ({s['label']})")
             continue
-        states.append({**s, "in": read_sweep(run_dir / s["input"]),
-                       "out": read_sweep(run_dir / s["output"])})
+        states.append({**s, **{side: read_sweep(run_dir / s[key])
+                               for side, key in FILES.items() if s.get(key)}})
     return meta, states
+
+
+def sides_of(states):
+    """The sweep types every state has."""
+    return [x for x in SIDES if states and all(x in s for s in states)]
 
 
 def angles_of(sw):
@@ -174,9 +220,10 @@ def angles_of(sw):
 def stokes_all(states, cal):
     """Extract S_in / S_out (and the fits) of every state for one calibration."""
     out = []
+    sides = sides_of(states)
     for s in states:
         r = {}
-        for side in ("in", "out"):
+        for side in sides:
             sw = s[side]
             r[side] = extract_stokes(sw["power_used"], angles_of(sw),
                                      qwp_zero_deg=cal["qwp_zero_deg"],
@@ -199,21 +246,22 @@ def coverage(S_in):
     return int((sv > 1e-2 * sv[0]).sum()), float(sv[0] / sv[-1])
 
 
-def monte_carlo(states, fits, cal, trials, rng):
+def monte_carlo(states, fits, cal, trials, rng, result):
     """Re-draw every sweep from its fitted model + its own residual noise."""
     Ms, ps = [], []
     delta = waves_to_deg(cal["qwp_retardance_waves"])
+    sides = sides_of(states)
     for _ in range(trials):
-        S_in, S_out = [], []
+        S = {x: [] for x in sides}
         for s, f in zip(states, fits):
-            for side, dest in (("in", S_in), ("out", S_out)):
+            for side in sides:
                 fit = f[side]
                 y = fit["model"] + rng.normal(0, fit["residual_rms"], fit["model"].size)
-                dest.append(extract_stokes(y, angles_of(s[side]),
-                                           qwp_zero_deg=cal["qwp_zero_deg"],
-                                           retardance_deg=delta,
-                                           s3_sign=cal["s3_sign"])["S"])
-        M = estimate(np.array(S_in).T, np.array(S_out).T)
+                S[side].append(extract_stokes(y, angles_of(s[side]),
+                                              qwp_zero_deg=cal["qwp_zero_deg"],
+                                              retardance_deg=delta,
+                                              s3_sign=cal["s3_sign"])["S"])
+        M = mueller_for(result, {x: np.array(v).T for x, v in S.items()})
         Ms.append(M / M[0, 0])
         ps.append(parameters(M))
     return np.array(Ms), ps
@@ -221,7 +269,7 @@ def monte_carlo(states, fits, cal, trials, rng):
 
 def apply_reference(states, use_reference):
     """Set sw["power_used"] on every sweep; returns (used?, present?)."""
-    sweeps = [s[side] for s in states for side in ("in", "out")]
+    sweeps = [s[side] for s in states for side in sides_of(states)]
     present = bool(sweeps) and all(has_reference(sw) for sw in sweeps)
     used = present and use_reference
     level = np.mean([sw["ref_W"].mean() for sw in sweeps]) if present else None
@@ -239,7 +287,7 @@ def rel_rms(sw, power, cal):
 
 def laser_summary(states, cal):
     """What the laser did during the run, from the reference meter."""
-    sweeps = [(s, side, s[side]) for s in states for side in ("in", "out")]
+    sweeps = [(s, side, s[side]) for s in states for side in sides_of(states)]
     means = np.array([sw["ref_W"].mean() for _, _, sw in sweeps])
     noise = []
     for _, _, sw in sweeps:
@@ -266,14 +314,18 @@ def laser_summary(states, cal):
 
 def fig_laser(plt, states, summary):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-    level = np.mean([s[side]["ref_W"].mean() for s in states for side in ("in", "out")])
+    sides = sides_of(states)
+    level = np.mean([s[side]["ref_W"].mean() for s in states for side in sides])
     for s in states:
-        for side, c in (("in", "C0"), ("out", "C1")):
+        for side, c in zip(sides, ("C0", "C1", "C2", "C3")):
             sw = s[side]
             ax1.plot(sw["t_s"] / 60, 100 * (sw["ref_W"] / level - 1), ".", color=c, ms=2)
         ax1.text(s["in"]["t_s"][0] / 60, 0, s["label"], fontsize=8, va="bottom")
-    ax1.plot([], [], ".", color="C0", label="input sweeps")
-    ax1.plot([], [], ".", color="C1", label="through-sample sweeps")
+    for side, c in zip(sides, ("C0", "C1", "C2", "C3")):
+        ax1.plot([], [], ".", color=c, label={"in": "input sweeps",
+                                               "out": "through-sample sweeps",
+                                               "in0": "empty input aperture",
+                                               "out0": "empty sample aperture"}[side])
     ax1.axhline(0, color="0.6", lw=0.6)
     ax1.set_xlabel("time since start of run (min)")
     ax1.set_ylabel("laser power - mean (%)")
@@ -281,7 +333,7 @@ def fig_laser(plt, states, summary):
                   f"peak-to-peak, noise {100 * summary['noise_per_reading']:.2f}% "
                   f"per reading", fontsize=10)
     ax1.legend(fontsize=8)
-    names = [f"{s['label']} {side}" for s in states for side in ("in", "out")]
+    names = [f"{s['label']} {side}" for s in states for side in sides]
     x = np.arange(len(names))
     ax2.bar(x - 0.2, 100 * np.array(summary["fit_rms_raw"]), 0.4, label="raw")
     ax2.bar(x + 0.2, 100 * np.array(summary["fit_rms_corrected"]), 0.4,
@@ -383,6 +435,9 @@ def main(argv=None) -> int:
     ap.add_argument("--use-reference", type=str2bool, default=True, dest="use_reference",
                     help="divide by the reference (laser monitor) meter when the "
                          "run has one")
+    ap.add_argument("--result", default=None, choices=list(RESULTS),
+                    help="what to report; null = film when the run measured the empty "
+                         "apertures, else relative (input -> sample)")
     ap.add_argument("--exclude-states", nargs="*", default=[], dest="exclude_states",
                     help="state numbers or labels to leave out")
     ap.add_argument("--monte-carlo-trials", type=int, default=500,
@@ -404,6 +459,13 @@ def main(argv=None) -> int:
     print(f"run: {run_dir}")
 
     meta, states = load(run_dir, {str(x) for x in a.exclude_states})
+    mode = meta.get("sample_mode")
+    if mode:
+        print(f"sample mode: {mode['kind']} -- input = {mode['reference']}, output = "
+              f"{mode['sample']}" + ("; empty apertures measured too" if mode.get("empty")
+                                     else ""))
+        if "dark_end_W" in meta:
+            print(f"  dark at the end of the run: {meta['dark_end_W'] * 1e9:+.1f} nW")
     rec = meta["calibration"]
     cal = {}
     print("\nPSA calibration")
@@ -437,9 +499,16 @@ def main(argv=None) -> int:
 
     # ---- Stokes vectors ---------------------------------------------------
     fits = stokes_all(states, cal)
-    S_in = np.array([f["in"]["S"] for f in fits]).T
-    S_out = np.array([f["out"]["S"] for f in fits]).T
+    sides = sides_of(states)
+    Sd = {x: np.array([f[x]["S"] for f in fits]).T for x in sides}
+    S_in, S_out = Sd["in"], Sd["out"]
     labels = [s["label"] for s in states]
+    avail = available_results(sides)
+    result = a.result or ("film" if "film" in avail else "relative")
+    if result not in avail:
+        raise SystemExit(f"result '{result}' needs the empty-aperture sweeps, which this run "
+                         f"does not have; available: {avail}")
+    print(f"\nresult: {result} -- {RESULTS[result][1]}")
 
     print(f"\n{'state':>5} {'label':8s} {'input S/S0':>30s}  {'DOP':>5}   "
           f"{'through sample S/S0':>30s}  {'DOP':>5}  fit rms in/out")
@@ -453,9 +522,21 @@ def main(argv=None) -> int:
               f"[{a_[1]:+.3f} {a_[2]:+.3f} {a_[3]:+.3f}]  {dop_in:5.3f}   "
               f"[{b_[1]:+.3f} {b_[2]:+.3f} {b_[3]:+.3f}]  "
               f"{np.linalg.norm(b_[1:]):5.3f}  {rin:.2f}% / {rout:.2f}%{flag}")
+    if "in0" in sides:
+        print(f"\n{'empty':>5} {'label':8s} {'input aperture S/S0':>30s}  {'DOP':>5}   "
+              f"{'sample aperture S/S0':>30s}  {'DOP':>5}  apertures differ by")
+        from polarization_toolkit.psg import sphere_angle_deg
+        for k, s in enumerate(states):
+            a_, b_ = Sd["in0"][:, k] / Sd["in0"][0, k], Sd["out0"][:, k] / Sd["out0"][0, k]
+            print(f"{s['index']:>5} {s['label']:8s} "
+                  f"[{a_[1]:+.3f} {a_[2]:+.3f} {a_[3]:+.3f}]  {np.linalg.norm(a_[1:]):5.3f}   "
+                  f"[{b_[1]:+.3f} {b_[2]:+.3f} {b_[3]:+.3f}]  {np.linalg.norm(b_[1:]):5.3f}  "
+                  f"{float(sphere_angle_deg(a_, b_)):.2f} deg")
 
     n = S_in.shape[1]
-    rank, cond = coverage(S_in) if n else (0, np.inf)
+    inputs = [Sd[x] for x, _ in RESULTS[result][0]]
+    covs = [coverage(X) for X in inputs] if n else [(0, np.inf)]
+    rank, cond = min(c[0] for c in covs), max(c[1] for c in covs)
     print(f"\ncoverage: {n} states, rank {rank} of 4, condition number {cond:.2f} "
           f"(1.73 = best possible)")
     if n < 4 or rank < 4:
@@ -471,19 +552,23 @@ def main(argv=None) -> int:
               "spread the states more (H V D A R L is ideal).")
 
     # ---- Mueller matrix ---------------------------------------------------
-    M = estimate(S_in, S_out)
+    M = mueller_for(result, Sd)
     m = M / M[0, 0]
     p0 = parameters(M)
 
-    print("\nper-state consistency  |M.S_in - S_out| / S_out0")
-    if n == 4:
-        print("  exactly 4 states: M fits them perfectly, so there is no "
-              "consistency check. Take 5+ states for one.")
-        misfit = [0.0] * n
-    else:
-        misfit = list(np.linalg.norm(M @ S_in - S_out, axis=0) / S_out[0])
-        med = np.median(misfit)
-        for s, e in zip(states, misfit):
+    misfit = {}
+    for x, y in RESULTS[result][0]:
+        Mxy = estimate(Sd[x], Sd[y])
+        print(f"\nper-state consistency  |M.S_{x} - S_{y}| / S_{y}0")
+        if n == 4:
+            print("  exactly 4 states: M fits them perfectly, so there is no "
+                  "consistency check. Take 5+ states for one.")
+            misfit[f"{x}->{y}"] = [0.0] * n
+            continue
+        e_xy = list(np.linalg.norm(Mxy @ Sd[x] - Sd[y], axis=0) / Sd[y][0])
+        misfit[f"{x}->{y}"] = [float(v) for v in e_xy]
+        med = np.median(e_xy)
+        for s, e in zip(states, e_xy):
             flag = ("  <- outlier: did the state change or the sample move?"
                     if e > 3 * med and e > 0.01 else "")
             print(f"  state {s['index']:>2} {s['label']:8s} {100 * e:6.2f}%{flag}")
@@ -492,7 +577,7 @@ def main(argv=None) -> int:
     rng = np.random.default_rng(0)
     if a.monte_carlo_trials > 0:
         print(f"\nMonte Carlo: {a.monte_carlo_trials} trials ...", end="", flush=True)
-        Ms, ps = monte_carlo(states, fits, cal, a.monte_carlo_trials, rng)
+        Ms, ps = monte_carlo(states, fits, cal, a.monte_carlo_trials, rng, result)
         m_err = Ms.std(axis=0, ddof=1)
         stat = {k: spread([p[k] for p in ps], PERIOD.get(k))[1] for k in p0 if k[0] != "_"}
         print(" done")
@@ -516,8 +601,7 @@ def main(argv=None) -> int:
         for k, v in shift.items():
             c2[k] = cal[k] + v
         f2 = stokes_all(states, c2)
-        M2 = estimate(np.array([f["in"]["S"] for f in f2]).T,
-                      np.array([f["out"]["S"] for f in f2]).T)
+        M2 = mueller_for(result, {x: np.array([f[x]["S"] for f in f2]).T for x in sides})
         p2 = parameters(M2)
         m_sys = np.maximum(m_sys, np.abs(M2 / M2[0, 0] - m))
         src = next(iter(shift)) if len(shift) == 1 else "both"
@@ -576,6 +660,18 @@ def main(argv=None) -> int:
         print("  retardance close to 180 deg: a thicker sample could wrap to the "
               "next branch -- values are modulo 360 deg.")
 
+    others = {}
+    if len(avail) > 1:
+        print("\nthe other results of this run (normalized; max |m_ij - identity|, M00):")
+        for r_ in avail:
+            Mr = mueller_for(r_, Sd)
+            others[r_] = {"M": Mr.tolist(), "M_normalized": (Mr / Mr[0, 0]).tolist(),
+                          "M00": float(Mr[0, 0])}
+            dev = float(np.abs(Mr / Mr[0, 0] - np.eye(4)).max())
+            note = ("  <- the halves differ by this much" if r_ == "null" else
+                    "  (reported above)" if r_ == result else "")
+            print(f"  {r_:15s} max |m - I| {dev:.4f}   M00 {Mr[0, 0]:.4f}{note}")
+
     # ---- save -------------------------------------------------------------
     out = run_dir / "analysis"
     out.mkdir(exist_ok=True)
@@ -585,8 +681,11 @@ def main(argv=None) -> int:
         "calibration_recorded": rec, "states": labels,
         "excluded": list(a.exclude_states),
         "coverage": {"rank": rank, "condition_number": cond},
+        "sample_mode": mode, "result": result, "result_meaning": RESULTS[result][1],
+        "all_results": others,
+        "S": {x: v.tolist() for x, v in Sd.items()},
         "S_in": S_in.tolist(), "S_out": S_out.tolist(),
-        "per_state_misfit": [float(x) for x in misfit],
+        "per_state_misfit": misfit,
         "M": M.tolist(), "M_normalized": m.tolist(), "M_normalized_err": m_err.tolist(),
         "M_normalized_sys_worst": m_sys.tolist(),
         "M_physical": cl["M_physical"].tolist(),
@@ -615,8 +714,8 @@ def main(argv=None) -> int:
         import matplotlib.pyplot as plt
         figs = {
             "mueller_matrix": fig_matrix(
-                plt, m, m_err, m_sys, f"M / M00   (M00 = {M[0, 0]:.4f}, cond {cond:.2f})"
-                               f"\n{run_dir.name}"),
+                plt, m, m_err, m_sys, f"{result}: M / M00   (M00 = {M[0, 0]:.4f}, cond "
+                               f"{cond:.2f})\n{run_dir.name}"),
             "poincare": fig_poincare(plt, S_in, S_out, labels),
             "fits": fig_fits(plt, states, fits),
         }

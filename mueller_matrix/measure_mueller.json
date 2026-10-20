@@ -23,6 +23,15 @@
   "zero_meter": true,
 
   "use_psg": true,
+
+  "use_flippers": true,
+  "film_flipper": "37XXXXXX",
+  "substrate_flipper": "37XXXXXX",
+  "flipper_block_position": 1,
+  "flipper_settle": 0.5,
+  "empty_at_end": true,
+  "dark_readings": 5,
+
   "states": ["H", "V", "D", "A", "R", "L"],
 
   "out": null,
@@ -32,5 +41,6 @@
   "sim_state_error_deg": 3.0,
   "sim_noise_rel": 0.001,
   "sim_laser_drift_rel": 0.01,
-  "sim_laser_noise_rel": 0.003
+  "sim_laser_noise_rel": 0.003,
+  "sim_ambient_rel": 0.01
 }

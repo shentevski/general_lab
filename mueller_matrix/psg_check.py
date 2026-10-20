@@ -81,6 +81,11 @@ def rig_settings(a):
     except FileNotFoundError:
         raise SystemExit(f"not found: {path}") from None
     cfg.update(use_psg=True, zero_meter=a.zero_meter, simulate=a.simulate)
+    # flippers: opened on connect, so a half-blocked beam cannot spoil the
+    # check -- only when they are really there (serials set, not simulated)
+    serials = [str(cfg.get(k, "")) for k in ("film_flipper", "substrate_flipper")]
+    cfg["use_flippers"] = bool(cfg.get("use_flippers")) and not a.simulate and all(
+        s and "X" not in s for s in serials)
     if a.qwp_steps:
         cfg["qwp_steps"] = a.qwp_steps
     defaults = {"qwp_sweep_deg": 360.0, "qwp_settle": 0.3, "s3_sign": 1,
