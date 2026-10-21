@@ -27,12 +27,15 @@
   "use_flippers": true,
   "film_flipper": "37XXXXXX",
   "substrate_flipper": "37XXXXXX",
-  "flipper_block_position": 1,
+  "flipper_film_block_position": 1,
+  "flipper_subst_block_position": 1,
   "flipper_settle": 0.5,
   "empty_at_end": true,
   "dark_readings": 5,
 
   "states": ["H", "V", "D", "A", "R", "L"],
+
+  "live_view": true,
 
   "out": null,
   "notes": "",

@@ -130,14 +130,19 @@ def flippers_configured(a) -> bool:
 class Flippers:
     """The two MFF10x flippers in front of the half film / half substrate
     sample: film_flipper blocks the film half, substrate_flipper the
-    substrate half. flipper_block_position is the position (1 or 2) that
-    puts the block INTO the beam."""
+    substrate half. flipper_film_block_position / flipper_subst_block_position
+    is the position (1 or 2) that puts each one's block INTO the beam (null:
+    flipper_block_position, for both)."""
 
     def __init__(self, a):
         self.serials = {"film": str(a.film_flipper), "substrate": str(a.substrate_flipper)}
-        self.block = int(a.flipper_block_position)
-        if self.block not in (1, 2):
-            raise ValueError("flipper_block_position must be 1 or 2")
+        common = getattr(a, "flipper_block_position", 1)
+        film = getattr(a, "flipper_film_block_position", None)
+        subst = getattr(a, "flipper_subst_block_position", None)
+        self.block = {"film": int(common if film is None else film),
+                      "substrate": int(common if subst is None else subst)}
+        if any(b not in (1, 2) for b in self.block.values()):
+            raise ValueError("flipper block positions must be 1 or 2")
         self.settle = float(a.flipper_settle)
         self.dev = {}
         self.view = None
@@ -156,7 +161,8 @@ class Flippers:
             self.__exit__(None, None, None)
             raise
         print(f"flippers        : film {self.serials['film']}, substrate "
-              f"{self.serials['substrate']} (block = position {self.block})")
+              f"{self.serials['substrate']} (block = position {self.block['film']} / "
+              f"{self.block['substrate']})")
         self.select("open")
         return self
 
@@ -177,14 +183,16 @@ class Flippers:
     def select(self, view):
         view = view_of(view)
         for half, d in self.dev.items():
-            d.move_to_position(self.block if half in VIEWS[view] else 3 - self.block)
+            b = self.block[half]
+            d.move_to_position(b if half in VIEWS[view] else 3 - b)
         time.sleep(self.settle)
         self.view = view
 
     def describe(self):
         return {"film_flipper": self.serials["film"],
                 "substrate_flipper": self.serials["substrate"],
-                "block_position": self.block}
+                "film_block_position": self.block["film"],
+                "subst_block_position": self.block["substrate"]}
 
 
 class Rig(PowerMeterPolarimeter):
@@ -392,11 +400,12 @@ class SimRig:
 # --------------------------------------------------------------------------- #
 
 
-def sweep(rig, a, tag, span_deg=360.0):
+def sweep(rig, a, tag, span_deg=360.0, on_point=None):
     """One QWP sweep of qwp_steps positions over span_deg -> dict with the
-    sweep CSV columns. 360 deg also separates beam walk (360-deg period)."""
+    sweep CSV columns. 360 deg also separates beam walk (360-deg period).
+    on_point(k, sw) is called after every point (the live view)."""
     return pm_sweep(rig, steps=a.qwp_steps, span_deg=span_deg, zero_deg=a.qwp_zero_deg,
-                    settle_s=a.qwp_settle, tag=tag)
+                    settle_s=a.qwp_settle, tag=tag, on_point=on_point)
 
 
 def analyse_sweep(sw, a):
@@ -460,7 +469,8 @@ def plan_states(psg, specs):
     return plans
 
 
-def measure_state(r, a, run, idx, auto=False, empty=False):
+def measure_state(r, a, run, idx, auto=False, empty=False, live=None, setting=None,
+                  label=""):
     """The input (reference) sweep, then the through-sample sweep. With the
     flippers (auto) they choose the substrate / film half; otherwise you take
     the sample out and put it back. Saves both and prints the live feedback;
@@ -478,11 +488,17 @@ def measure_state(r, a, run, idx, auto=False, empty=False):
         else:
             input(what)
             r.set_sample(side == "out")
-        sw = sweep(r, a, tag, a.qwp_sweep_deg)
+        if live is not None:
+            live.start_sweep(label or str(idx), side, what if auto else "",
+                             target=None if setting is None else setting.target, psg=setting)
+        sw = sweep(r, a, tag, a.qwp_sweep_deg,
+                   on_point=None if live is None else live.point)
         write_sweep(run / f"state_{idx:02d}_{side}.csv", sw["commanded_deg"],
                     sw["measured_deg"], sw["power_W"], sw["ref_W"], sw["t_s"])
         f = analyse_sweep(sw, a)
         sweeps[side], fits[side] = sw, f
+        if live is not None:
+            live.end_sweep(idx, side, f["S"])
         name = {"in": "S_ref" if auto else "S_in ", "out": "S_out",
                 "in0": "S_e,s", "out0": "S_e,f"}[side]
         fit_txt = (f"fit rms {100 * f['rms_raw']:.2f}% raw -> "
@@ -551,6 +567,9 @@ def main(argv=None) -> int:
                     default=True, dest="zero_meter")
     ap.add_argument("--out", default=None, help="output root (default: Desktop)")
     ap.add_argument("--notes", default="")
+    ap.add_argument("--live-view", type=str2bool, default=True, dest="live_view",
+                    help="a live window: the sweep as it comes in, the ellipse, the "
+                         "Poincare sphere, a live Mueller matrix, the flippers and time left")
     ap.add_argument("--use-psg", type=str2bool, default=True, dest="use_psg",
                     help="the PSG sets the states (false: you set them by hand)")
     ap.add_argument("--use-flippers", type=str2bool, default=False, dest="use_flippers",
@@ -562,7 +581,15 @@ def main(argv=None) -> int:
                     help="serial of the flipper that blocks the SUBSTRATE half")
     ap.add_argument("--flipper-block-position", type=int, default=1, choices=(1, 2),
                     dest="flipper_block_position",
-                    help="flipper position that puts the block INTO the beam")
+                    help="block position for both flippers, unless each has its own")
+    ap.add_argument("--flipper-film-block-position", type=int, default=None, choices=(1, 2),
+                    dest="flipper_film_block_position",
+                    help="position that puts the FILM flipper's block into the beam "
+                         "(null: flipper_block_position)")
+    ap.add_argument("--flipper-subst-block-position", type=int, default=None, choices=(1, 2),
+                    dest="flipper_subst_block_position",
+                    help="position that puts the SUBSTRATE flipper's block into the beam "
+                         "(null: flipper_block_position)")
     ap.add_argument("--flipper-settle", type=float, default=0.5, dest="flipper_settle")
     ap.add_argument("--empty-at-end", type=str2bool, default=True, dest="empty_at_end",
                     help="flippers: at the end you remove film + substrate, and every state "
@@ -632,6 +659,9 @@ def main(argv=None) -> int:
         save()
 
         S_in_list = []
+        from live_view import LiveView
+        per_state = 2 + (2 if auto and a.empty_at_end and r.psg is not None else 0)
+        live = LiveView(a, len(a.states), per_state, enabled=a.live_view)
         if r.psg is not None:
             plan_states(r.psg, a.states)
             for idx, spec in enumerate(a.states, 1):
@@ -639,7 +669,8 @@ def main(argv=None) -> int:
                 setting = r.set_state(spec)
                 print(f"  PSG: HWP {setting.hwp_deg:.2f} deg, QWP {setting.qwp_deg:.2f} deg "
                       f"(model: {setting.error_deg:.2f} deg from the target)")
-                fits = measure_state(r, a, run, idx, auto)
+                fits = measure_state(r, a, run, idx, auto, live=live, setting=setting,
+                                     label=setting.label)
                 miss = float(sphere_angle_deg(fits["in"]["S"], setting.target))
                 if auto:
                     print(f"  through the substrate the state is {miss:.2f} deg from the "
@@ -674,7 +705,7 @@ def main(argv=None) -> int:
                             continue
                     break
                 r.set_state(label)
-                fits = measure_state(r, a, run, idx, auto)
+                fits = measure_state(r, a, run, idx, auto, live=live, label=label)
                 meta["states"].append({"index": idx, "label": label,
                                        "input": f"state_{idx:02d}_in.csv",
                                        "output": f"state_{idx:02d}_out.csv"})
@@ -695,8 +726,9 @@ def main(argv=None) -> int:
             for entry, spec in zip(meta["states"], a.states):
                 idx = entry["index"]
                 print(f"\n--- empty, state {idx} of {len(meta['states'])}: {entry['label']} ---")
-                r.set_state(spec)
-                fits = measure_state(r, a, run, idx, auto, empty=True)
+                setting = r.set_state(spec)
+                fits = measure_state(r, a, run, idx, auto, empty=True, live=live,
+                                     setting=setting, label=entry["label"])
                 null = float(sphere_angle_deg(fits["in0"]["S"], fits["out0"]["S"]))
                 ratio = fits["out0"]["S"][0] / fits["in0"]["S"][0]
                 print(f"  the two empty apertures differ by {null:.2f} deg on the Poincare "
@@ -721,8 +753,13 @@ def main(argv=None) -> int:
             r.set_sample("open")
             save()
 
+        live.finish(run / "live_view.png")
+
     print(f"\n{len(meta['states'])} states saved in {run}")
     print("Analyse with: python analyze_mueller.py   (set run_dir in analyze_mueller.json)")
+    if live.enabled and live.interactive and not live.closed:
+        print("(close the live window to finish)")
+        live.plt.show()
     return 0
 
 

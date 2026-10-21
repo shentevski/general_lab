@@ -109,7 +109,8 @@ Key settings in `measure_mueller.json`:
 | `states` | the states, in order: names (`"H"` … `"L"`), `[S1, S2, S3]`, or `{"azimuth_deg": 30, "ellipticity_deg": 10}` |
 | `use_flippers` | the two flippers choose the film / substrate half: fully automatic (`false`: you move the sample) |
 | `film_flipper`, `substrate_flipper` | serials of the flippers that block the film half and the substrate half (MFF, start with 37) |
-| `flipper_block_position` | the flipper position, 1 or 2, that puts the block INTO the beam |
+| `flipper_film_block_position`, `flipper_subst_block_position` | the position, 1 or 2, that puts each flipper's block INTO the beam (null: `flipper_block_position` for both) |
+| `live_view` | a live window during the run (below) |
 | `empty_at_end` | at the end, remove film + substrate once; every state is measured again through each empty aperture |
 | `dark_readings` | readings averaged for the dark check at the end |
 
@@ -161,6 +162,23 @@ Setup, once: `python flipper.py` in `thorlabs_motion` lists the flippers and the
 serials. Check which position blocks (`flipper_block_position`). If `thorlabs_motion`
 was installed before the flipper support, reinstall it (`pip install -e .` in that
 folder) so `flipper` can be imported.
+
+## Live view
+
+With `live_view: true` a window shows the run as it happens:
+
+- **the sweep:** signal vs polarimeter QWP angle, point by point, with the Fourier fit
+  growing as points come in, and the Stokes vector and DOP so far;
+- **the polarization ellipse** of the state being measured, on top of its target;
+- **the Poincaré sphere** filling up: reference (o), through the sample (^), empty
+  apertures (s, D), a dashed line from each state's reference to its sample point;
+- **a live Mueller matrix** (sample relative to reference) as soon as four states pin it
+  down, with the condition number and M00;
+- **status:** which half the flippers let through, the PSG angles, the laser monitor,
+  elapsed time and time left.
+
+Closing the window does not stop the run. The final picture is saved as
+`live_view.png` in the run folder; at the end the window stays open until you close it.
 
 ## Analyze
 
