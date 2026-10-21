@@ -469,14 +469,25 @@ def plan_states(psg, specs):
     return plans
 
 
+def concat(*sws):
+    """Several sweeps of the same state as one (fitted together)."""
+    return {k: np.concatenate([sw[k] for sw in sws]) for k in sws[0]}
+
+
 def measure_state(r, a, run, idx, auto=False, empty=False, live=None, setting=None,
                   label=""):
     """The input (reference) sweep, then the through-sample sweep. With the
     flippers (auto) they choose the substrate / film half; otherwise you take
-    the sample out and put it back. Saves both and prints the live feedback;
-    returns the two fits."""
+    the sample out and put it back. With abba (flippers, not the empty pass)
+    the order is reference, sample, sample, reference: a slow drift of
+    anything between the two kinds of sweep cancels to first order, and each
+    pair is fitted as one double sweep. Saves every sweep and prints the live
+    feedback; returns (fits, files) -- fits["in"] / fits["out"] combined."""
     sweeps, fits = {}, {}
+    abba = auto and not empty and getattr(a, "abba", False)
     steps = ((("in0", "reference", "empty"), ("out0", "sample", "empty")) if empty else
+             (("in", "reference", "substr A"), ("out", "sample", "film A"),
+              ("out_b", "sample", "film B"), ("in_b", "reference", "substr B")) if abba else
              (("in", "reference", "substr"), ("out", "sample", "film")) if auto else
              (("in", "REMOVE the sample, then press Enter to measure the input state...",
                "input"),
@@ -488,8 +499,10 @@ def measure_state(r, a, run, idx, auto=False, empty=False, live=None, setting=No
         else:
             input(what)
             r.set_sample(side == "out")
+        base = side.split("_")[0]
         if live is not None:
-            live.start_sweep(label or str(idx), side, what if auto else "",
+            live.start_sweep(f"{label or idx}" + (" (B)" if side.endswith("_b") else ""),
+                             base, what if auto else "",
                              target=None if setting is None else setting.target, psg=setting)
         sw = sweep(r, a, tag, a.qwp_sweep_deg,
                    on_point=None if live is None else live.point)
@@ -498,21 +511,30 @@ def measure_state(r, a, run, idx, auto=False, empty=False, live=None, setting=No
         f = analyse_sweep(sw, a)
         sweeps[side], fits[side] = sw, f
         if live is not None:
-            live.end_sweep(idx, side, f["S"])
-        name = {"in": "S_ref" if auto else "S_in ", "out": "S_out",
-                "in0": "S_e,s", "out0": "S_e,f"}[side]
+            live.end_sweep(idx, base, f["S"])
+        name = {"in": "S_ref" if auto else "S_in ", "out": "S_out", "in_b": "S_ref B",
+                "out_b": "S_out B", "in0": "S_e,s", "out0": "S_e,f"}[side]
         fit_txt = (f"fit rms {100 * f['rms_raw']:.2f}% raw -> "
                    f"{100 * f['rms_rel']:.2f}% laser-corrected"
                    if "rms_raw" in f else f"fit rms {100 * f['rms_rel']:.2f}%")
         print(f"  {name} = {fmt(f['S'])}   {fit_txt}")
         if has_reference(sw):
             print(f"          {laser_line(sw)}")
+    files = {side: f"state_{idx:02d}_{side}.csv" for side in sweeps}
+    if abba:
+        for side in ("in", "out"):
+            drift = float(sphere_angle_deg(fits[side]["S"], fits[side + "_b"]["S"]))
+            print(f"  {'reference' if side == 'in' else 'sample'} A vs B: {drift:.3f} deg "
+                  f"apart (drift during this state)")
+            fits[side] = analyse_sweep(concat(sweeps[side], sweeps[side + "_b"]), a)
+            files[side] = [files[side], files.pop(side + "_b")]
+        sweeps = {k: concat(sweeps[k], sweeps[k + "_b"]) for k in ("in", "out")}
     a_, b_ = ("in0", "out0") if empty else ("in", "out")
     if has_reference(sweeps[a_]) and not empty:
         change = np.mean(sweeps[b_]["ref_W"]) / np.mean(sweeps[a_]["ref_W"]) - 1
         print(f"  laser changed {100 * change:+.2f}% between the input and "
               f"through-sample sweeps (corrected)")
-    return fits
+    return fits, files
 
 
 def report_coverage(S_in_list):
@@ -591,6 +613,9 @@ def main(argv=None) -> int:
                     help="position that puts the SUBSTRATE flipper's block into the beam "
                          "(null: flipper_block_position)")
     ap.add_argument("--flipper-settle", type=float, default=0.5, dest="flipper_settle")
+    ap.add_argument("--abba", type=str2bool, default=True,
+                    help="flippers: per state reference, sample, sample, reference -- slow "
+                         "drift between them cancels (twice the sweeps)")
     ap.add_argument("--empty-at-end", type=str2bool, default=True, dest="empty_at_end",
                     help="flippers: at the end you remove film + substrate, and every state "
                          "is measured again through each empty aperture")
@@ -660,8 +685,11 @@ def main(argv=None) -> int:
 
         S_in_list = []
         from live_view import LiveView
-        per_state = 2 + (2 if auto and a.empty_at_end and r.psg is not None else 0)
-        live = LiveView(a, len(a.states), per_state, enabled=a.live_view)
+        main_sweeps = 4 if auto and a.abba else 2
+        empty_sweeps = 2 if auto and a.empty_at_end and r.psg is not None else 0
+        live = LiveView(a, len(a.states), main_sweeps + empty_sweeps, enabled=a.live_view)
+        empty_share = len(a.states) * empty_sweeps / main_sweeps    # in "states" of time
+        t_run = r.now()
         if r.psg is not None:
             plan_states(r.psg, a.states)
             for idx, spec in enumerate(a.states, 1):
@@ -669,8 +697,8 @@ def main(argv=None) -> int:
                 setting = r.set_state(spec)
                 print(f"  PSG: HWP {setting.hwp_deg:.2f} deg, QWP {setting.qwp_deg:.2f} deg "
                       f"(model: {setting.error_deg:.2f} deg from the target)")
-                fits = measure_state(r, a, run, idx, auto, live=live, setting=setting,
-                                     label=setting.label)
+                fits, files = measure_state(r, a, run, idx, auto, live=live,
+                                            setting=setting, label=setting.label)
                 miss = float(sphere_angle_deg(fits["in"]["S"], setting.target))
                 if auto:
                     print(f"  through the substrate the state is {miss:.2f} deg from the "
@@ -681,12 +709,14 @@ def main(argv=None) -> int:
                                                  "calibrate)" if miss > 2.0
                                                  and r.psg.cal.calibrated else ""))
                 meta["states"].append({"index": idx, "label": setting.label,
-                                       "input": f"state_{idx:02d}_in.csv",
-                                       "output": f"state_{idx:02d}_out.csv",
+                                       "input": files["in"], "output": files["out"],
                                        "psg": setting.to_dict(), "input_miss_deg": miss})
                 save()
                 S_in_list.append(fits["in"]["S"])
                 report_coverage(S_in_list)
+                left = (r.now() - t_run) / idx * (len(a.states) - idx + empty_share)
+                print(f"  {(r.now() - t_run) / 60:.1f} min so far, about {left / 60:.0f} min "
+                      f"left")
         else:
             idx = 0
             while True:
@@ -705,10 +735,9 @@ def main(argv=None) -> int:
                             continue
                     break
                 r.set_state(label)
-                fits = measure_state(r, a, run, idx, auto, live=live, label=label)
+                fits, files = measure_state(r, a, run, idx, auto, live=live, label=label)
                 meta["states"].append({"index": idx, "label": label,
-                                       "input": f"state_{idx:02d}_in.csv",
-                                       "output": f"state_{idx:02d}_out.csv"})
+                                       "input": files["in"], "output": files["out"]})
                 save()
                 S_in_list.append(fits["in"]["S"])
                 report_coverage(S_in_list)
@@ -727,8 +756,8 @@ def main(argv=None) -> int:
                 idx = entry["index"]
                 print(f"\n--- empty, state {idx} of {len(meta['states'])}: {entry['label']} ---")
                 setting = r.set_state(spec)
-                fits = measure_state(r, a, run, idx, auto, empty=True, live=live,
-                                     setting=setting, label=entry["label"])
+                fits, _ = measure_state(r, a, run, idx, auto, empty=True, live=live,
+                                        setting=setting, label=entry["label"])
                 null = float(sphere_angle_deg(fits["in0"]["S"], fits["out0"]["S"]))
                 ratio = fits["out0"]["S"][0] / fits["in0"]["S"][0]
                 print(f"  the two empty apertures differ by {null:.2f} deg on the Poincare "

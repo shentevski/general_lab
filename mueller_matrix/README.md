@@ -111,6 +111,7 @@ Key settings in `measure_mueller.json`:
 | `film_flipper`, `substrate_flipper` | serials of the flippers that block the film half and the substrate half (MFF, start with 37) |
 | `flipper_film_block_position`, `flipper_subst_block_position` | the position, 1 or 2, that puts each flipper's block INTO the beam (null: `flipper_block_position` for both) |
 | `live_view` | a live window during the run (below) |
+| `abba` | flippers: per state reference, sample, sample, reference (drift cancels; default on) |
 | `empty_at_end` | at the end, remove film + substrate once; every state is measured again through each empty aperture |
 | `dark_readings` | readings averaged for the dark check at the end |
 
@@ -162,6 +163,34 @@ Setup, once: `python flipper.py` in `thorlabs_motion` lists the flippers and the
 serials. Check which position blocks (`flipper_block_position`). If `thorlabs_motion`
 was installed before the flipper support, reinstall it (`pip install -e .` in that
 folder) so `flipper` can be imported.
+
+## Precise measurement
+
+Polarimeter noise is already small (about 0.05° per sweep, against about 0.5° of
+systematic effects), so averaging longer alone buys little. What helps:
+
+- **ABBA order** (`abba`, on by default with the flippers): per state reference, sample,
+  sample, reference. Slow drift of anything between the two kinds of sweep cancels to
+  first order (the reference meter only corrects laser power); each pair is fitted as one
+  double sweep. Every state prints how far its A and B sweeps are apart: a direct
+  drift monitor. It doubles the sweeps.
+- **More states:** the six plus the eight cube corners give the same ideal conditioning
+  (1.73), about 1.5× lower noise in M, state-specific errors averaged out, and a
+  per-state consistency check:
+  ```json
+  "states": ["H", "V", "D", "A", "R", "L",
+             [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+             [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1]],
+  ```
+- **Longer averaging and settling:** `"pm_average_count": 1000`, `"qwp_settle": 0.5`,
+  `"flipper_settle": 1.0`.
+- **A fixed meter range:** auto-ranging can switch mid-sweep and put a step in the data.
+  After a first run, set `power_range_w` a little above the largest signal you saw.
+- **Lights off, zeroing on** (`zero_meter`), and the laser warmed up.
+
+With all of it a run takes a few hours. After each state it prints the time so far and
+an estimate of the time left. The drift between the sample pass and the empty-aperture
+pass cancels in the `film` result, as long as both halves drift the same way.
 
 ## Live view
 

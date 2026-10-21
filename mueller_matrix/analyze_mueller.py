@@ -202,9 +202,18 @@ def load(run_dir: Path, exclude):
         if str(s["index"]) in exclude or s["label"] in exclude:
             print(f"  excluding state {s['index']} ({s['label']})")
             continue
-        states.append({**s, **{side: read_sweep(run_dir / s[key])
+        states.append({**s, **{side: read_files(run_dir, s[key])
                                for side, key in FILES.items() if s.get(key)}})
     return meta, states
+
+
+def read_files(run_dir, names):
+    """One sweep file, or a list of them (ABBA: the A and B sweeps of the same
+    state) read as one double sweep."""
+    if isinstance(names, str):
+        return read_sweep(run_dir / names)
+    sws = [read_sweep(run_dir / n) for n in names]
+    return {k: np.concatenate([sw[k] for sw in sws]) for k in sws[0]}
 
 
 def sides_of(states):
