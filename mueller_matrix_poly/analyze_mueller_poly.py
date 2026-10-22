@@ -4,7 +4,7 @@
     python analyze_mueller_poly.py              # reads analyze_mueller_poly.json
     python analyze_mueller_poly.py <run_dir>    # or name the run folder directly
 
-The spectral version of ../mueller_matrix/analyze_mueller.py -- the same
+The spectral version of ../mueller_matrix_flippers/analyze_mueller.py -- the same
 steps, once per wavelength bin (bin_nm wide, from wl_min_nm to wl_max_nm):
 
   1. counts minus the shutter dark, divided by the LED monitor when the run
@@ -385,7 +385,7 @@ def main(argv=None) -> int:
     print(f"run: {run_dir}")
     meta, states = load(run_dir, {str(x) for x in a.exclude_states})
     if meta.get("kind") != "mueller_spectral":
-        raise SystemExit("not a spectral run -- use ../mueller_matrix/analyze_mueller.py")
+        raise SystemExit("not a spectral run -- use ../mueller_matrix_flippers/analyze_mueller.py")
     full_scale = meta["settings"].get("full_scale_counts", 65535)
 
     # ---- calibration --------------------------------------------------------

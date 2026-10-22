@@ -1,0 +1,13 @@
+{
+  "states": [],
+
+  "measure_config": "measure_mueller.json",
+  "qwp_steps": null,
+  "zero_meter": false,
+
+  "show_figures": true,
+  "save": true,
+  "out": null,
+
+  "simulate": false
+}

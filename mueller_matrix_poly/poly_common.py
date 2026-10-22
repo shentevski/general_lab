@@ -1,6 +1,6 @@
 """Shared maths and file handling for the spectral (LED + CCT10) Mueller scripts.
 
-The physics is the SAME as in ../mueller_matrix and is imported from there,
+The physics is the SAME as in ../mueller_matrix_flippers and is imported from there,
 not copied -- two copies of the maths would be two things that can silently
 disagree: the Stokes inversion for a QWP of any retardance
 (stokes_from_coeffs), the retarder split, the Cloude check and the config
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-_MM = Path(__file__).resolve().parent.parent / "mueller_matrix"
+_MM = Path(__file__).resolve().parent.parent / "mueller_matrix_flippers"
 if str(_MM) not in sys.path:
     sys.path.insert(0, str(_MM))
 

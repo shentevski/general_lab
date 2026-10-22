@@ -6,7 +6,7 @@ and QWP zero, plus beam walk and analyzer leak.
     python QWP_analyzer_characterization_poly.py --simulate       # rehearse, no hardware
     python QWP_analyzer_characterization_poly.py <run_dir> ...    # analyse existing runs
 
-The spectral version of ../mueller_matrix/QWP_analyzer_characterization.py:
+The spectral version of ../mueller_matrix_flippers/QWP_analyzer_characterization.py:
 the same idea, once per wavelength bin. Hardware and the calibration currently
 ASSUMED come from measure_mueller_poly.json; this script's own settings from
 QWP_analyzer_characterization_poly.json. Existing runs can be characterization

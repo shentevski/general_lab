@@ -1,4 +1,7 @@
-# Mueller matrix of a sample
+# Mueller matrix of a sample — flippers (two apertures)
+
+The single-beam version with a translation stage (empty / substrate / film, measured
+minutes apart for every state) is [`../mueller_matrix_t_stage`](../mueller_matrix_t_stage).
 
 Rotating-QWP polarimeter (QWP on K-Cube 28000005 → fixed analyzer → PM100D + S130VC),
 input states set by the motorized PSG (polarizer → HWP → QWP), a second PM100D as

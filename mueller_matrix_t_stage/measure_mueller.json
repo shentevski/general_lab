@@ -1,0 +1,54 @@
+{
+  "qwp_motor": "28000005",
+  "qwp_stage": "none",
+  "home": true,
+
+  "qwp_steps": 100,
+  "qwp_sweep_deg": 360,
+  "qwp_settle": 0.5,
+
+  "qwp_zero_deg": 92.83,
+  "qwp_retardance_waves": 0.2422,
+  "s3_sign": 1,
+
+  "wavelength_nm": 520,
+  "pm_average_count": 1000,
+
+  "pm_serial": "P0044867",
+  "power_range_w": null,
+
+  "ref_pm_serial": "P0049251",
+  "ref_power_range_w": null,
+
+  "zero_meter": true,
+
+  "use_psg": true,
+  "states": ["H", "V", "D", "A", "R", "L",
+             [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
+             [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1]],
+
+  "use_stage": true,
+  "stage_motor": "26XXXXXX",
+  "stage_name": null,
+  "stage_home": true,
+  "empty_mm": 4.5866,
+  "substrate_mm": 12.7767,
+  "film_mm": 21.4397,
+  "dark_mm": null,
+  "stage_approach_mm": 0.2,
+  "stage_settle": 0.5,
+  "sequence": ["E", "S", "F", "F", "S", "E"],
+  "dark_readings": 5,
+
+  "live_view": true,
+
+  "out": null,
+  "notes": "",
+
+  "simulate": false,
+  "sim_state_error_deg": 3.0,
+  "sim_noise_rel": 0.001,
+  "sim_laser_drift_rel": 0.01,
+  "sim_laser_noise_rel": 0.003,
+  "sim_ambient_rel": 0.01
+}

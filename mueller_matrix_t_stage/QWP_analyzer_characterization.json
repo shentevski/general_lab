@@ -1,0 +1,19 @@
+{
+  "run_dirs": [],
+
+  "psg_states": ["H", "R", "L", "D", "A", "V"],
+  "repeats": 10,
+  "qwp_sweep_deg": 360,
+
+  "s3_min": 0.3,
+  "min_dop_slope": 0.01,
+  "include_through_sample": false,
+  "fix_zero_deg": null,
+  "input_dop_min": 0.998,
+
+  "show_figures": true,
+  "save_figures": true,
+
+  "sim_true_zero_deg": null,
+  "sim_true_retardance_waves": null
+}

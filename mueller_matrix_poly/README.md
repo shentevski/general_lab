@@ -1,6 +1,6 @@
 # Mueller matrix at every wavelength (LED + spectrometer)
 
-The spectral version of [`../mueller_matrix`](../mueller_matrix): the laser is replaced by a
+The spectral version of [`../mueller_matrix_flippers`](../mueller_matrix_flippers): the laser is replaced by a
 broadband LED (MBB1F1, 470–850 nm) and the signal power meter by a CCT10 spectrometer. A
 whole spectrum is recorded at every QWP step, so one run gives M(λ), about 480–820 nm.
 
@@ -12,7 +12,7 @@ LED → collimator → polarizer (V) → beamsplitter → HWP (DDR25) → QWP (P
 
 The input states are set by the PSG, driven by `polarization_toolkit` (`poltk psg`), as
 in the laser version. Its calibration is shared: it is calibrated once with the 520 nm
-laser (`poltk psg calibrate`, see `../mueller_matrix`) and read from `~/.poltk` by
+laser (`poltk psg calibrate`, see `../mueller_matrix_flippers`) and read from `~/.poltk` by
 these scripts too.
 
 | file | what |
@@ -22,7 +22,7 @@ these scripts too.
 | `QWP_analyzer_characterization_poly.py` + `.json` | calibrates the polarimeter at every wavelength: QWP retardance δ(λ), QWP zero, beam walk, analyzer leak |
 | `poly_common.py` | wavelength bins, spectrum files, calibration curves |
 
-The physics is **imported** from `../mueller_matrix`: the Stokes inversion for any QWP
+The physics is **imported** from `../mueller_matrix_flippers`: the Stokes inversion for any QWP
 retardance, the retarder split, the Cloude check and every reported parameter. That folder
 must sit next to this one. Hardware: `thorlabs_spectrometer` (Windows only), `kcube`,
 `thorlabs_powermeter` (only with a reference meter). `--simulate` runs anywhere.
@@ -75,7 +75,7 @@ characterization measures it. A diffuser or a large‑core fibre reduces it.
 2. **`full_scale_counts`, once.** 65535 (16‑bit) is assumed. Saturate a pixel and read the
    raw value to check it. The clipping check also detects a flat‑topped spectrum on its
    own.
-3. **PSG:** set up and calibrated with the laser, as in `../mueller_matrix` (its
+3. **PSG:** set up and calibrated with the laser, as in `../mueller_matrix_flippers` (its
    steps 1 and 3). The calibration in `~/.poltk` is used here automatically.
 4. **Calibrate the polarimeter:** `python QWP_analyzer_characterization_poly.py`. No
    sample. After the exposure it runs on its own: the PSG sets every state in

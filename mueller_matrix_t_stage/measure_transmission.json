@@ -1,0 +1,10 @@
+{
+  "cycles": 5,
+  "readings": 20,
+
+  "meter_serial": null,
+  "power_range_w": null,
+
+  "out": null,
+  "notes": ""
+}

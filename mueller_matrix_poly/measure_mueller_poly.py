@@ -4,7 +4,7 @@
     python measure_mueller_poly.py                # reads measure_mueller_poly.json
     python measure_mueller_poly.py --simulate     # rehearse, no hardware
 
-The spectral version of ../mueller_matrix/measure_mueller.py: the same layout
+The spectral version of ../mueller_matrix_flippers/measure_mueller.py: the same layout
 and procedure, with the laser replaced by a broadband LED (MBB1F1, 470-850 nm)
 and the signal power meter by a CCT10 spectrometer.
 
