@@ -1,0 +1,24 @@
+{
+  "calibration_file": null,
+
+  "pm_serial": null,
+  "pm_average_count": 100,
+  "pm_readings": 5,
+  "zero_pm": true,
+
+  "wl_start_nm": null,
+  "wl_stop_nm": null,
+  "wl_step_nm": 5,
+  "wavelengths_nm": null,
+
+  "target_power_uw": null,
+  "probe": true,
+  "probe_margin": 0.9,
+  "power_tol_rel": 0.01,
+  "max_iterations": 6,
+  "led_warmup_s": 30,
+  "dwell_s": 0,
+
+  "show_plots": true,
+  "notes": ""
+}

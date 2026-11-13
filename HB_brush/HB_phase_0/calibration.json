@@ -1,0 +1,48 @@
+{
+  "stage_serial": null,
+  "stage_name": "PRMTZ8",
+  "home": "auto",
+  "stage_settle_s": 0.3,
+
+  "led_serial": null,
+  "led_max_ma": null,
+  "led_settle_s": 1.0,
+
+  "spectrometer_id": null,
+  "hw_average": 5,
+  "full_scale_counts": 65535,
+  "background": "led_off",
+  "background_frames": 3,
+
+  "data_dir": null,
+
+  "angle_start_deg": 0,
+  "angle_stop_deg": 60,
+  "angle_step_deg": 2,
+  "angles_deg": null,
+
+  "current_start_ma": 100,
+  "current_stop_ma": null,
+  "current_count": 10,
+  "currents_ma": null,
+  "reference_current_ma": null,
+
+  "led_warmup_s": 30,
+  "prescan": true,
+  "target_fill": 0.7,
+  "exposure_ms": null,
+  "drift_check": true,
+
+  "wl_min_nm": 400,
+  "wl_max_nm": 900,
+  "min_peak_counts": 300,
+  "peak_method": "centroid",
+  "peak_threshold_rel": 0.5,
+  "band_halfwidth_nm": null,
+  "fit_order": 5,
+  "max_residual_nm": 0.5,
+
+  "show_plots": true,
+  "notes": "",
+  "simulate": false
+}

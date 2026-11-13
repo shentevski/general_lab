@@ -1,0 +1,15 @@
+{
+  "calibration_file": null,
+
+  "wavelength_nm": null,
+  "amplitude_counts": null,
+
+  "verify": true,
+  "refine_iterations": 2,
+  "wl_tolerance_nm": 0.2,
+  "amplitude_tolerance_rel": 0.02,
+  "background_refresh_s": 600,
+
+  "leave_led_on": true,
+  "notes": ""
+}
